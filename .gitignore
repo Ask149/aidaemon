@@ -1,7 +1,7 @@
 # Binaries
-aidaemon
-test-copilot
-probe-models
+/aidaemon
+/test-copilot
+/probe-models
 *.exe
 
 # OS
