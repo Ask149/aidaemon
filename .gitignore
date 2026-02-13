@@ -1,0 +1,19 @@
+# Binaries
+aidaemon
+test-copilot
+probe-models
+*.exe
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Go
+/vendor/
+
+# Auth (never commit tokens)
+auth.json
