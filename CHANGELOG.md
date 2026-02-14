@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `/tools` command — lists all tools grouped by source (built-in vs MCP server)
+- `/context` command — detailed context window breakdown (tokens, roles, capacity bar)
+- Rich stats footer on every response: token counts (with K/M formatting), timing, tool usage, LLM call count
+- Proactive token budget management — trims messages before LLM calls to stay within model limits
+- Auto-recovery from token limit errors — emergency summarization with cheap model (up to 3 retries)
+- Tool result truncation — caps individual tool outputs at 30K chars to prevent context blowout
+- Per-tool execution timing and error tracking in `Result`
+- `ModelTokenLimit()` — static token limit map for all supported models
+- Watchdog script (`scripts/watchdog.sh`) — keeps daemon alive via macOS launchd (every 30 min)
+
+### Changed
+- `/status` now shows model tier (premium/unlimited), context health bar, token limit, and tool count
+- `/help` reorganized into Chat / Monitoring / Tips sections
+- Stats footer upgraded from simple `tokens | model` to full `tokens | timing | tools | LLM calls | model`
+- Max-iteration summary now handles token limit errors with emergency fallback
+
 ## [0.1.0] — 2026-02-13
 
 First complete release with all core features.

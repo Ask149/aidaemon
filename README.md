@@ -16,6 +16,8 @@ Chat with GPT-5, Claude Opus 4.6, Gemini 3 Pro, and 10+ other models from your p
 - **HTTP API** — REST endpoints for programmatic access alongside the Telegram interface
 - **Permission system** — configurable per-tool access control with path/command/domain rules
 - **Audit logging** — structured log of every tool execution with timing data
+- **Token management** — proactive context trimming, auto-summarize on token limit errors, emergency compaction
+- **Rich stats footer** — every response shows token usage, timing, tool calls, and model info
 - **Single-user security** — only your Telegram user ID can interact with the bot
 
 ## Quick Start
@@ -57,6 +59,15 @@ Create `~/.config/aidaemon/config.json`:
 }
 ```
 
+You can also use a markdown file for richer system prompts:
+
+```bash
+# Create a system prompt file (takes priority over config field)
+vim ~/.config/aidaemon/system_prompt.md
+```
+
+When `~/.config/aidaemon/system_prompt.md` exists, it is loaded automatically and takes priority over the `system_prompt` field in config.json.
+
 <details>
 <summary><strong>Getting your Telegram credentials</strong></summary>
 
@@ -83,7 +94,9 @@ The daemon starts, connects to Telegram, and waits for your messages.
 | _any text_ | Chat with the AI (streamed response) |
 | `/model` | List available models |
 | `/model <id>` | Switch model (e.g., `/model gpt-5`) |
-| `/status` | Show current model and context info |
+| `/status` | Model, context health, tool count |
+| `/context` | Detailed context window breakdown (tokens, roles, capacity) |
+| `/tools` | List all available tools grouped by source |
 | `/reset` | Clear conversation history |
 | `/help` | Show help |
 
@@ -164,7 +177,9 @@ Configure in `config.json`:
   "max_conversation_messages": 20,     // Messages before context compaction
 
   // System prompt
-  "system_prompt": "string",           // Prepended to every conversation
+  "system_prompt": "string",           // Inline prompt (overridden by system_prompt.md file)
+
+  // Or use a file: ~/.config/aidaemon/system_prompt.md  (takes priority)
 
   // Storage
   "db_path": "string",                 // SQLite path (default: ~/.config/aidaemon/aidaemon.db)
@@ -242,6 +257,10 @@ cmd/
   probe-models/          Model discovery testing
   test-tools/            Tool execution testing
 
+scripts/
+  watchdog.sh            Watchdog script (keeps daemon alive)
+  com.ask149.*.plist     macOS launchd agent for 30-min checks
+
 internal/
   auth/                  GitHub OAuth + Copilot token management
   config/                Configuration loading and validation
@@ -258,6 +277,113 @@ internal/
     mcp_tool.go          MCP tool adapter
 ```
 
+## Running as a Service
+
+AIDaemon includes a watchdog script that keeps the daemon alive. It checks every 30 minutes (via macOS `launchd`) and restarts the daemon if it crashed or was stopped.
+
+### Quick setup
+
+```bash
+# Install the launchd agent (runs every 30 min + at login)
+make watchdog-install
+```
+
+That's it. The watchdog will:
+- Start aidaemon immediately if it's not running
+- Auto-rebuild the binary if Go source files changed
+- Rotate daemon logs when they exceed 50 MB
+- Log all health checks to `~/.config/aidaemon/data/logs/watchdog.log`
+
+### Manual control
+
+```bash
+make watchdog              # Run the watchdog once manually
+./scripts/watchdog.sh --force   # Force kill + restart
+make watchdog-uninstall    # Remove the launchd agent
+```
+
+### How it works
+
+| File | Purpose |
+|------|----------|
+| `scripts/watchdog.sh` | Bash script — checks PID, starts/restarts daemon |
+| `scripts/com.ask149.aidaemon.watchdog.plist` | macOS launchd agent definition |
+| `~/.config/aidaemon/data/logs/watchdog.log` | Watchdog check history |
+| `~/.config/aidaemon/data/logs/aidaemon-daemon.log` | Daemon stdout/stderr (when started by watchdog) |
+| `~/.config/aidaemon/data/logs/aidaemon.pid` | PID file for fast alive-checks |
+
+<details>
+<summary><strong>Setting up a similar watchdog for your own project</strong></summary>
+
+The pattern is generic — you can adapt it for any long-running process on macOS:
+
+1. **Create a watchdog script** (`scripts/watchdog.sh`):
+   - Check if the process is running (`pgrep` or PID file)
+   - If running → log "OK" and exit
+   - If not → start the process via `nohup ... &`, save PID
+   - Optional: auto-build if source is newer than binary
+
+2. **Create a launchd plist** (`~/Library/LaunchAgents/com.yourname.yourapp.watchdog.plist`):
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0">
+   <dict>
+       <key>Label</key>
+       <string>com.yourname.yourapp.watchdog</string>
+       <key>ProgramArguments</key>
+       <array>
+           <string>/path/to/your/watchdog.sh</string>
+       </array>
+       <key>StartInterval</key>
+       <integer>1800</integer>  <!-- 30 minutes -->
+       <key>RunAtLoad</key>
+       <true/>
+       <key>EnvironmentVariables</key>
+       <dict>
+           <key>PATH</key>
+           <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+       </dict>
+       <key>StandardOutPath</key>
+       <string>/path/to/watchdog-launchd.log</string>
+       <key>StandardErrorPath</key>
+       <string>/path/to/watchdog-launchd.log</string>
+   </dict>
+   </plist>
+   ```
+
+3. **Load the agent**:
+   ```bash
+   cp your.plist ~/Library/LaunchAgents/
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/your.plist
+   ```
+
+4. **Unload when needed**:
+   ```bash
+   launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/your.plist
+   ```
+
+**On Linux**, replace launchd with a systemd user service:
+```ini
+# ~/.config/systemd/user/yourapp-watchdog.timer
+[Unit]
+Description=Watchdog for yourapp
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=30min
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+systemctl --user enable --now yourapp-watchdog.timer
+```
+
+</details>
+
 ## Development
 
 ```bash
@@ -266,6 +392,11 @@ go vet ./...             # Static analysis
 go test ./...            # Run tests
 go run -race ./cmd/aidaemon/  # Run with race detector
 go install ./cmd/aidaemon/    # Install to $GOBIN
+
+# Watchdog (keeps daemon alive)
+make watchdog-install         # Install launchd agent (every 30 min)
+make watchdog-uninstall       # Remove launchd agent
+make watchdog                 # Run watchdog once manually
 ```
 
 ## Security

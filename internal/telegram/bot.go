@@ -95,6 +95,8 @@ func New(cfg Config) (*Bot, error) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/reset", bot.MatchTypePrefix, tb.handleReset)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/status", bot.MatchTypePrefix, tb.handleStatus)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/model", bot.MatchTypePrefix, tb.handleModel)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/tools", bot.MatchTypePrefix, tb.handleTools)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/context", bot.MatchTypePrefix, tb.handleContext)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/help", bot.MatchTypePrefix, tb.handleHelp)
 
 	return tb, nil
@@ -180,9 +182,22 @@ func (tb *Bot) handleMessage(ctx context.Context, b *bot.Bot, update *models.Upd
 	// Set up Telegram-aware tool executor (handles MCP screenshots, etc.).
 	tb.engine.Executor = &telegramToolExecutor{bot: tb, chatID: chatID}
 
+	// Progress callback: update the placeholder message so the user
+	// can see what's happening during multi-step tool execution.
+	var lastProgressUpdate time.Time
+	progressCb := func(update engine.ProgressUpdate) {
+		// Rate-limit edits to avoid Telegram API throttling (~1/sec).
+		if time.Since(lastProgressUpdate) < 2*time.Second {
+			return
+		}
+		lastProgressUpdate = time.Now()
+		tb.editText(ctx, chatID, placeholder.ID, update.Message)
+	}
+
 	// Delegate to the chat engine for the tool-call loop.
 	result, err := tb.engine.Run(ctx, messages, engine.RunOptions{
-		Model: tb.model,
+		Model:      tb.model,
+		OnProgress: progressCb,
 	})
 
 	// Handle engine-level errors.
@@ -219,15 +234,321 @@ sendResult:
 	go tb.compactIfNeeded(ctx, chatIDStr)
 
 	// Append usage footer.
-	footer := ""
-	if result.Usage != nil && (result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
-		footer = fmt.Sprintf("\n\n📊 %d→%d tokens | %s",
-			result.Usage.InputTokens, result.Usage.OutputTokens, tb.model)
-	}
+	footer := tb.buildStatsFooter(result)
 
 	// Format as HTML for rich output (bold, code, links, etc.).
 	formatted := FormatHTML(result.Content + footer)
 	tb.editHTML(ctx, chatID, placeholder.ID, formatted)
+}
+
+// --- Stats footer ---
+
+// buildStatsFooter creates a compact stats line appended to every response.
+// Always shows at least timing and model name.
+// Example outputs:
+//   📊 1.2K→234 tok | ⏱ 3.4s | claude-sonnet-4.5
+//   📊 45K→1.2K tok (68K total) | ⏱ 12.5s | 🔧 3 tools (read_file ×2, run_command) | 2 LLM calls | gpt-4o
+//   📊 ~2.1K→89 tok | ⏱ 0.8s | claude-sonnet-4.5
+func (tb *Bot) buildStatsFooter(result *engine.Result) string {
+	if result == nil {
+		return ""
+	}
+
+	var parts []string
+
+	// Token usage — show API-reported counts, or estimated counts as fallback.
+	hasAPITokens := result.Usage != nil && (result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0)
+
+	if hasAPITokens {
+		tokenStr := fmt.Sprintf("%s→%s",
+			formatTokenCount(int(result.Usage.InputTokens)),
+			formatTokenCount(int(result.Usage.OutputTokens)))
+
+		// Show total across all LLM calls if there were multiple.
+		if result.LLMCalls > 1 && result.TotalUsage.InputTokens > 0 {
+			totalTokens := result.TotalUsage.InputTokens + result.TotalUsage.OutputTokens
+			tokenStr += fmt.Sprintf(" (%s total)", formatTokenCount(int(totalTokens)))
+		}
+
+		if result.Usage.CachedTokens > 0 {
+			tokenStr += fmt.Sprintf(" [%s cached]", formatTokenCount(int(result.Usage.CachedTokens)))
+		}
+
+		parts = append(parts, tokenStr+" tok")
+	} else {
+		// Estimate tokens from message content when API doesn't report usage.
+		var inputEst, outputEst int
+		for _, m := range result.Messages {
+			inputEst += engine.EstimateMessageTokens(m)
+		}
+		outputEst = len(result.Content) / 4 // ~4 chars per token for natural text
+		if inputEst > 0 || outputEst > 0 {
+			parts = append(parts, fmt.Sprintf("~%s→%s tok",
+				formatTokenCount(inputEst), formatTokenCount(outputEst)))
+		}
+	}
+
+	// Timing.
+	if result.Duration > 0 {
+		parts = append(parts, fmt.Sprintf("⏱ %s", formatDuration(result.Duration)))
+	}
+
+	// Tool usage.
+	if result.ToolIterations > 0 {
+		toolStr := fmt.Sprintf("🔧 %d tool", len(result.ToolNames))
+		if len(result.ToolNames) != 1 {
+			toolStr += "s"
+		}
+		if uniqueNames := result.UniqueToolNames(); uniqueNames != "" {
+			toolStr += " (" + uniqueNames + ")"
+		}
+		parts = append(parts, toolStr)
+	}
+
+	// LLM calls (only show if >1, since 1 is the norm).
+	if result.LLMCalls > 1 {
+		parts = append(parts, fmt.Sprintf("%d LLM calls", result.LLMCalls))
+	}
+
+	// Emergency summarization warnings.
+	if result.SummarizeCount > 0 {
+		parts = append(parts, fmt.Sprintf("⚠️ %d auto-compaction", result.SummarizeCount))
+	}
+
+	// Trimmed messages warning.
+	if result.TrimmedMessages > 0 {
+		parts = append(parts, fmt.Sprintf("✂️ %d msgs trimmed", result.TrimmedMessages))
+	}
+
+	// Always show at least model name — even with no other stats.
+	if len(parts) == 0 {
+		return fmt.Sprintf("\n\n📊 %s", tb.model)
+	}
+
+	// Model name goes at the end.
+	return fmt.Sprintf("\n\n📊 %s | %s", strings.Join(parts, " | "), tb.model)
+}
+
+// --- New command handlers ---
+
+// handleTools lists all available tools, grouped by source.
+func (tb *Bot) handleTools(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if !tb.isAuthorized(update.Message.Chat.ID) {
+		return
+	}
+
+	if tb.tools == nil || len(tb.tools.List()) == 0 {
+		tb.sendText(ctx, update.Message.Chat.ID, "🔧 No tools registered.")
+		return
+	}
+
+	// Group tools by source (built-in vs MCP server name).
+	builtIn := make([]string, 0)
+	mcpGroups := make(map[string][]string) // server → tool names
+	mcpOrder := make([]string, 0)
+
+	for _, t := range tb.tools.List() {
+		name := t.Name()
+		if strings.HasPrefix(name, "mcp_") {
+			// Extract server name: "mcp_playwright_browser_click" → "playwright"
+			parts := strings.SplitN(name, "_", 3)
+			if len(parts) >= 3 {
+				server := parts[1]
+				shortName := parts[2]
+				if _, exists := mcpGroups[server]; !exists {
+					mcpOrder = append(mcpOrder, server)
+				}
+				mcpGroups[server] = append(mcpGroups[server], shortName)
+			}
+		} else {
+			builtIn = append(builtIn, name)
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🔧 <b>Available Tools</b>\n\n")
+
+	if len(builtIn) > 0 {
+		sb.WriteString("<b>⚡ Built-in</b>\n")
+		for _, name := range builtIn {
+			sb.WriteString(fmt.Sprintf("  • <code>%s</code>\n", name))
+		}
+		sb.WriteString("\n")
+	}
+
+	for _, server := range mcpOrder {
+		tools := mcpGroups[server]
+		sb.WriteString(fmt.Sprintf("<b>🔌 %s</b> (%d tools)\n", server, len(tools)))
+		// Show first 10 tools, then summarize.
+		showCount := len(tools)
+		if showCount > 10 {
+			showCount = 10
+		}
+		for _, name := range tools[:showCount] {
+			sb.WriteString(fmt.Sprintf("  • <code>%s</code>\n", name))
+		}
+		if len(tools) > 10 {
+			sb.WriteString(fmt.Sprintf("  <i>... and %d more</i>\n", len(tools)-10))
+		}
+		sb.WriteString("\n")
+	}
+
+	totalCount := len(builtIn)
+	for _, t := range mcpGroups {
+		totalCount += len(t)
+	}
+	sb.WriteString(fmt.Sprintf("<i>Total: %d tools across %d sources</i>", totalCount, len(mcpGroups)+1))
+
+	tb.sendHTML(ctx, update.Message.Chat.ID, sb.String())
+}
+
+// handleContext shows detailed context window information.
+func (tb *Bot) handleContext(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if !tb.isAuthorized(update.Message.Chat.ID) {
+		return
+	}
+
+	chatIDStr := strconv.FormatInt(update.Message.Chat.ID, 10)
+	count, _ := tb.store.MessageCount(chatIDStr)
+	limit := tb.store.Limit()
+
+	// Get actual messages to compute breakdown.
+	history, err := tb.store.GetHistory(chatIDStr)
+
+	var totalChars int
+	var roleBreakdown [4]int // system, user, assistant, tool
+	var hasSummary bool
+
+	if err == nil {
+		for _, m := range history {
+			totalChars += len(m.Content)
+			switch m.Role {
+			case "system":
+				roleBreakdown[0]++
+				if strings.Contains(m.Content, "[Previous conversation summary") {
+					hasSummary = true
+				}
+			case "user":
+				roleBreakdown[1]++
+			case "assistant":
+				roleBreakdown[2]++
+			case "tool":
+				roleBreakdown[3]++
+			}
+		}
+	}
+
+	// Context usage.
+	contextPct := 0
+	if limit > 0 {
+		contextPct = (count * 100) / limit
+	}
+	contextBar := progressBar(contextPct)
+
+	// Token estimate.
+	estimatedTokens := totalChars / 3 // conservative
+	tokenLimitVal := modelTokenLimitStr(tb.model)
+
+	// System prompt size.
+	sysPromptTokens := len(tb.sysPrompt) / 3
+
+	var sb strings.Builder
+	sb.WriteString("📐 <b>Context Window Details</b>\n\n")
+	sb.WriteString(fmt.Sprintf("<b>Messages:</b> %d/%d %s (%d%%)\n", count, limit, contextBar, contextPct))
+	sb.WriteString(fmt.Sprintf("<b>Est. tokens:</b> ~%s / %s\n", formatTokenCount(estimatedTokens), tokenLimitVal))
+	sb.WriteString(fmt.Sprintf("<b>Characters:</b> %s\n\n", formatNumber(totalChars)))
+
+	sb.WriteString("<b>Message Breakdown:</b>\n")
+	sb.WriteString(fmt.Sprintf("  💻 System: %d", roleBreakdown[0]))
+	if sysPromptTokens > 0 {
+		sb.WriteString(fmt.Sprintf(" (~%s tok prompt)", formatTokenCount(sysPromptTokens)))
+	}
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("  👤 User: %d\n", roleBreakdown[1]))
+	sb.WriteString(fmt.Sprintf("  🤖 Assistant: %d\n", roleBreakdown[2]))
+	if roleBreakdown[3] > 0 {
+		sb.WriteString(fmt.Sprintf("  🔧 Tool: %d\n", roleBreakdown[3]))
+	}
+
+	sb.WriteString("\n<b>Status:</b>\n")
+	if hasSummary {
+		sb.WriteString("  📝 Contains compacted summary\n")
+	}
+	if contextPct >= 80 {
+		sb.WriteString("  🔴 Auto-compact imminent (triggers at 80%)\n")
+	} else if contextPct >= 50 {
+		sb.WriteString("  🟡 Moderate usage — no action needed\n")
+	} else {
+		sb.WriteString("  🟢 Plenty of room\n")
+	}
+
+	sb.WriteString("\n<i>💡 /reset to clear context, or it auto-compacts at 80%</i>")
+
+	tb.sendHTML(ctx, update.Message.Chat.ID, sb.String())
+}
+
+// --- Formatting helpers ---
+
+// formatTokenCount formats a token count with K/M suffixes.
+func formatTokenCount(tokens int) string {
+	switch {
+	case tokens >= 1000000:
+		return fmt.Sprintf("%.1fM", float64(tokens)/1000000)
+	case tokens >= 1000:
+		return fmt.Sprintf("%.1fK", float64(tokens)/1000)
+	default:
+		return strconv.Itoa(tokens)
+	}
+}
+
+// formatNumber formats a number with comma separators.
+func formatNumber(n int) string {
+	if n < 1000 {
+		return strconv.Itoa(n)
+	}
+	if n < 1000000 {
+		return fmt.Sprintf("%d,%03d", n/1000, n%1000)
+	}
+	return fmt.Sprintf("%d,%03d,%03d", n/1000000, (n/1000)%1000, n%1000)
+}
+
+// formatDuration formats a duration in a compact, readable way.
+func formatDuration(d time.Duration) string {
+	switch {
+	case d < time.Second:
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	case d < time.Minute:
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	case d < time.Hour:
+		min := int(d.Minutes())
+		sec := int(d.Seconds()) % 60
+		return fmt.Sprintf("%dm%ds", min, sec)
+	default:
+		return d.Round(time.Second).String()
+	}
+}
+
+// progressBar returns a text-based progress bar.
+func progressBar(pct int) string {
+	const total = 10
+	if pct > 100 {
+		pct = 100
+	}
+	if pct < 0 {
+		pct = 0
+	}
+	filled := pct * total / 100
+	empty := total - filled
+	return strings.Repeat("█", filled) + strings.Repeat("░", empty)
+}
+
+// modelTokenLimitStr returns the token limit as a formatted string.
+func modelTokenLimitStr(model string) string {
+	limit := engine.ModelTokenLimit(model)
+	if limit == 0 {
+		return "unknown"
+	}
+	return formatTokenCount(limit)
 }
 
 func (tb *Bot) handleReset(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -249,12 +570,55 @@ func (tb *Bot) handleStatus(ctx context.Context, b *bot.Bot, update *models.Upda
 	}
 	chatIDStr := strconv.FormatInt(update.Message.Chat.ID, 10)
 	count, _ := tb.store.MessageCount(chatIDStr)
+	limit := tb.store.Limit()
+
+	// Context health indicator.
+	contextPct := 0
+	if limit > 0 {
+		contextPct = (count * 100) / limit
+	}
+	contextBar := progressBar(contextPct)
+	contextEmoji := "🟢"
+	if contextPct >= 80 {
+		contextEmoji = "🔴"
+	} else if contextPct >= 50 {
+		contextEmoji = "🟡"
+	}
+
+	// Model info.
+	modelTier := "unknown"
+	modelLimit := modelTokenLimitStr(tb.model)
+	for _, m := range tb.provider.Models() {
+		if m.ID == tb.model {
+			if m.Premium {
+				modelTier = "⭐ premium"
+			} else {
+				modelTier = "♾️ unlimited"
+			}
+			if m.MaxContextTokens > 0 {
+				modelLimit = formatTokenCount(m.MaxContextTokens)
+			}
+			break
+		}
+	}
+
+	// Tool count.
+	toolCount := 0
+	if tb.tools != nil {
+		toolCount = len(tb.tools.List())
+	}
+
 	text := fmt.Sprintf(
 		"📊 <b>AIDaemon Status</b>\n\n"+
-			"🤖 Model: <code>%s</code>\n"+
-			"💬 Messages in context: %d/%d\n"+
-			"📡 Provider: %s",
-		tb.model, count, tb.convLimit, tb.provider.Name(),
+			"🤖 <b>Model:</b> <code>%s</code> (%s)\n"+
+			"📐 <b>Context:</b> %s tokens\n"+
+			"%s <b>Messages:</b> %d/%d %s (%d%%)\n"+
+			"🔧 <b>Tools:</b> %d registered\n"+
+			"📡 <b>Provider:</b> %s\n\n"+
+			"<i>💡 /help for commands, /tools to list tools, /context for details</i>",
+		tb.model, modelTier, modelLimit,
+		contextEmoji, count, limit, contextBar, contextPct,
+		toolCount, tb.provider.Name(),
 	)
 	tb.sendHTML(ctx, update.Message.Chat.ID, text)
 }
@@ -294,11 +658,20 @@ func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update
 	}
 	text := "🤖 <b>AIDaemon Commands</b>\n\n" +
 		"Just send a message to chat with the AI.\n\n" +
-		"/status — show current model and context size\n" +
-		"/model — list available models\n" +
-		"/model &lt;id&gt; — switch model\n" +
+		"<b>💬 Chat</b>\n" +
 		"/reset — clear conversation history\n" +
-		"/help — this message"
+		"/model — list available models\n" +
+		"/model &lt;id&gt; — switch model\n\n" +
+		"<b>📊 Monitoring</b>\n" +
+		"/status — model, context health, tool count\n" +
+		"/context — detailed context window breakdown\n" +
+		"/tools — list all available tools\n\n" +
+		"<b>💡 Tips</b>\n" +
+		"• Send images for vision analysis\n" +
+		"• Context auto-compacts at 80% capacity\n" +
+		"• Token limit errors auto-recover via summarization\n" +
+		"• Stats footer shows timing, tokens, and tools used\n" +
+		"• Premium models (⭐) use your Copilot quota"
 	tb.sendHTML(ctx, update.Message.Chat.ID, text)
 }
 
@@ -691,6 +1064,7 @@ func (tb *Bot) executeToolsForChat(ctx context.Context, chatID int64, toolCalls 
 
 // maybeAutoScreenshot takes a screenshot after state-changing Playwright
 // tool calls and sends it to the Telegram chat.
+// It waits briefly for page rendering to settle and retries once on failure.
 func (tb *Bot) maybeAutoScreenshot(ctx context.Context, chatID int64, toolName string) {
 	// Only trigger for Playwright tools.
 	if !strings.HasPrefix(toolName, "mcp_playwright_") {
@@ -713,19 +1087,44 @@ func (tb *Bot) maybeAutoScreenshot(ctx context.Context, chatID int64, toolName s
 		return
 	}
 
+	// Wait for the page to settle after state-changing actions.
+	// Navigation and click events may trigger rendering/network activity
+	// that takes a moment to complete.
+	time.Sleep(800 * time.Millisecond)
+
 	log.Printf("[telegram] auto-screenshot after %s", bareName)
 
-	// Call browser_take_screenshot via the MCP client.
-	result, err := mcpTool.Client().CallTool("browser_take_screenshot", map[string]interface{}{})
-	if err != nil {
-		log.Printf("[telegram] auto-screenshot failed: %v", err)
-		return
-	}
+	// Try taking screenshot with one retry on failure.
+	for attempt := 1; attempt <= 2; attempt++ {
+		result, err := mcpTool.Client().CallTool("browser_take_screenshot", map[string]interface{}{})
+		if err != nil {
+			log.Printf("[telegram] auto-screenshot attempt %d failed: %v", attempt, err)
+			if attempt < 2 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return
+		}
 
-	// Extract and send any images from the result.
-	text := mcp.ExtractText(result)
-	if strings.Contains(text, "[MCP_IMAGE:") {
-		tb.handleMCPImages(ctx, chatID, text, "auto-screenshot")
+		// Check if the tool reported an error.
+		if result.IsError {
+			errText := mcp.ExtractText(result)
+			log.Printf("[telegram] auto-screenshot attempt %d returned error: %s", attempt, errText)
+			if attempt < 2 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return
+		}
+
+		// Extract and send any images from the result.
+		text := mcp.ExtractText(result)
+		if strings.Contains(text, "[MCP_IMAGE:") {
+			tb.handleMCPImages(ctx, chatID, text, "auto-screenshot")
+		} else {
+			log.Printf("[telegram] auto-screenshot: no image content in result (len=%d)", len(text))
+		}
+		return // success or no image — done
 	}
 }
 
@@ -909,7 +1308,21 @@ func (tb *Bot) handlePhotoMessage(ctx context.Context, b *bot.Bot, update *model
 
 	// Delegate to the chat engine for the tool-call loop.
 	tb.engine.Executor = &telegramToolExecutor{bot: tb, chatID: chatID}
-	result, err := tb.engine.Run(ctx, messages, engine.RunOptions{Model: tb.model})
+
+	// Progress callback for image analysis.
+	var lastImgProgress time.Time
+	imgProgressCb := func(update engine.ProgressUpdate) {
+		if time.Since(lastImgProgress) < 2*time.Second {
+			return
+		}
+		lastImgProgress = time.Now()
+		tb.editText(ctx, chatID, placeholder.ID, update.Message)
+	}
+
+	result, err := tb.engine.Run(ctx, messages, engine.RunOptions{
+		Model:      tb.model,
+		OnProgress: imgProgressCb,
+	})
 
 	if err != nil {
 		log.Printf("[telegram] image engine error: %v", err)
@@ -936,11 +1349,7 @@ sendImageResult:
 		}
 	}
 
-	footer := ""
-	if result.Usage != nil && (result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
-		footer = fmt.Sprintf("\n\n📊 %d→%d tokens | %s",
-			result.Usage.InputTokens, result.Usage.OutputTokens, tb.model)
-	}
+	footer := tb.buildStatsFooter(result)
 
 	formatted := FormatHTML(result.Content + footer)
 	tb.editHTML(ctx, chatID, placeholder.ID, formatted)

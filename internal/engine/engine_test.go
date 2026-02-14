@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/Ask149/aidaemon/internal/provider"
@@ -240,10 +241,6 @@ func TestRun_MaxIterationsSummary(t *testing.T) {
 		MaxIterations: 3,
 	})
 
-	// The engine returns an error AND a partial result (the summary).
-	// Wait — looking at the code, if summary succeeds, it returns result, nil.
-	// Actually, looking at the code more carefully:
-	// After the max-iteration summary, it returns result, nil if summary succeeded.
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -255,6 +252,154 @@ func TestRun_MaxIterationsSummary(t *testing.T) {
 	}
 	if len(dummy.ExecuteCalls) != 3 {
 		t.Errorf("execute calls = %d, want 3", len(dummy.ExecuteCalls))
+	}
+}
+
+func TestIsTokenLimitError(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		wantOK  bool
+		wantAct int
+		wantLim int
+	}{
+		{
+			name:    "copilot token limit error",
+			err:     fmt.Errorf("LLM error: copilot API error: HTTP 400: {\"error\":{\"message\":\"prompt token count of 165170 exceeds the limit of 128000\"}}"),
+			wantOK:  true,
+			wantAct: 165170,
+			wantLim: 128000,
+		},
+		{
+			name:   "regular error",
+			err:    fmt.Errorf("network timeout"),
+			wantOK: false,
+		},
+		{
+			name:   "nil error",
+			err:    nil,
+			wantOK: false,
+		},
+		{
+			name:    "different numbers",
+			err:     fmt.Errorf("prompt token count of 200000 exceeds the limit of 100000"),
+			wantOK:  true,
+			wantAct: 200000,
+			wantLim: 100000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual, limit, ok := isTokenLimitError(tt.err)
+			if ok != tt.wantOK {
+				t.Errorf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok {
+				if actual != tt.wantAct {
+					t.Errorf("actual = %d, want %d", actual, tt.wantAct)
+				}
+				if limit != tt.wantLim {
+					t.Errorf("limit = %d, want %d", limit, tt.wantLim)
+				}
+			}
+		})
+	}
+}
+
+func TestRun_AutoSummarizeOnTokenLimit(t *testing.T) {
+	callCount := 0
+	mp := &testutil.MockProvider{
+		ChatFn: func(_ context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+			callCount++
+			switch callCount {
+			case 1:
+				// First call: return token limit error.
+				return nil, fmt.Errorf("copilot API error: HTTP 400: {\"error\":{\"message\":\"prompt token count of 165170 exceeds the limit of 128000\",\"code\":\"model_max_prompt_tokens_exceeded\"}}")
+			case 2:
+				// Second call: the emergency summarize call (gpt-4o-mini).
+				// Verify it's using the cheap model.
+				if req.Model != "gpt-4o-mini" {
+					t.Errorf("summarize model = %q, want gpt-4o-mini", req.Model)
+				}
+				return &provider.ChatResponse{
+					Content:      "Summary of previous conversation: user discussed Go programming.",
+					FinishReason: "stop",
+				}, nil
+			case 3:
+				// Third call: retry with summarized messages — succeeds.
+				return &provider.ChatResponse{
+					Content:      "Here's my response after summarization.",
+					FinishReason: "stop",
+					Usage:        provider.Usage{InputTokens: 5000, OutputTokens: 100},
+				}, nil
+			default:
+				return &provider.ChatResponse{Content: "unexpected call", FinishReason: "stop"}, nil
+			}
+		},
+	}
+
+	// Build a conversation with enough messages to summarize.
+	input := []provider.Message{
+		{Role: "system", Content: "You are a helpful assistant."},
+		{Role: "user", Content: "Tell me about Go."},
+		{Role: "assistant", Content: "Go is a statically typed language."},
+		{Role: "user", Content: "What about concurrency?"},
+		{Role: "assistant", Content: "Go has goroutines and channels."},
+		{Role: "user", Content: "Show me an example."},
+		{Role: "assistant", Content: "Here's a goroutine example: go func() { ... }()"},
+		{Role: "user", Content: "How about error handling?"},
+	}
+
+	e := &Engine{Provider: mp}
+	result, err := e.Run(context.Background(), input, RunOptions{Model: "gpt-4o"})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Content != "Here's my response after summarization." {
+		t.Errorf("content = %q, want %q", result.Content, "Here's my response after summarization.")
+	}
+	// Should have been called 3 times: fail → summarize → success.
+	if callCount != 3 {
+		t.Errorf("callCount = %d, want 3", callCount)
+	}
+}
+
+func TestRun_AutoSummarizeExhaustsRetries(t *testing.T) {
+	mp := &testutil.MockProvider{
+		ChatFn: func(_ context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+			// Emergency summarize calls use gpt-4o-mini — let those succeed.
+			if req.Model == "gpt-4o-mini" {
+				return &provider.ChatResponse{
+					Content:      "Summary of conversation.",
+					FinishReason: "stop",
+				}, nil
+			}
+			// All main model calls fail with token limit error.
+			return nil, fmt.Errorf("copilot API error: HTTP 400: {\"error\":{\"message\":\"prompt token count of 200000 exceeds the limit of 128000\"}}")
+		},
+	}
+
+	input := []provider.Message{
+		{Role: "system", Content: "You are helpful."},
+		{Role: "user", Content: "msg1"},
+		{Role: "assistant", Content: "reply1"},
+		{Role: "user", Content: "msg2"},
+		{Role: "assistant", Content: "reply2"},
+		{Role: "user", Content: "msg3"},
+		{Role: "assistant", Content: "reply3"},
+		{Role: "user", Content: "msg4"},
+	}
+
+	e := &Engine{Provider: mp}
+	_, err := e.Run(context.Background(), input, RunOptions{Model: "gpt-4o"})
+
+	if err == nil {
+		t.Fatal("expected error after exhausting retries, got nil")
+	}
+	if !strings.Contains(err.Error(), "LLM error") {
+		t.Errorf("error = %q, should contain 'LLM error'", err.Error())
 	}
 }
 

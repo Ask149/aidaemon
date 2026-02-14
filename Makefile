@@ -52,3 +52,25 @@ cover:
 # Install the pre-commit hook
 hooks:
 	python3 .githooks/install.py
+
+# ── Watchdog (keeps aidaemon alive) ──────────────────────────────────
+PLIST_SRC  = scripts/com.ask149.aidaemon.watchdog.plist
+PLIST_DEST = $(HOME)/Library/LaunchAgents/com.ask149.aidaemon.watchdog.plist
+
+# Install and start the watchdog (runs every 30 min)
+watchdog-install:
+	@mkdir -p $(HOME)/Library/LaunchAgents
+	cp $(PLIST_SRC) $(PLIST_DEST)
+	launchctl bootout gui/$$(id -u) $(PLIST_DEST) 2>/dev/null || true
+	launchctl bootstrap gui/$$(id -u) $(PLIST_DEST)
+	@echo "✓ watchdog installed — runs every 30 min + at login"
+
+# Stop and remove the watchdog
+watchdog-uninstall:
+	launchctl bootout gui/$$(id -u) $(PLIST_DEST) 2>/dev/null || true
+	rm -f $(PLIST_DEST)
+	@echo "✓ watchdog removed"
+
+# Run the watchdog once manually
+watchdog:
+	./scripts/watchdog.sh
