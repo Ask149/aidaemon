@@ -404,7 +404,7 @@ Will follow same pattern: inline error message in Telegram.
 [daemon] copilot auth OK (expires in 24h0m0s)
 [copilot] discovered 13 models from API
 [daemon] provider: copilot (13 models)
-[telegram] bot starting (user_id=8564687989, model=claude-opus-4.6)
+[telegram] bot starting (user_id=XXXXXXXXXX, model=claude-sonnet-4.5)
 ```
 
 ### Future Metrics (Post-Tool Implementation)
@@ -461,7 +461,7 @@ CMD ["./aidaemon"]
 
 ## References
 
-- **OpenCode architecture:** `/Users/ashishkshirsagar/Projects/active/opencode`
+- **OpenCode architecture:** https://github.com/sst/opencode
 - **Copilot API:** Reverse-engineered from OpenCode + Zed editor
 - **MCP protocol:** https://modelcontextprotocol.io/
 - **Telegram Bot API:** https://core.telegram.org/bots/api

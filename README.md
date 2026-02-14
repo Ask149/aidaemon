@@ -24,8 +24,8 @@ AIDaemon is a personal AI agent daemon that runs on your Mac and gives you acces
 ### 2. Authentication
 
 ```bash
-cd /Users/ashishkshirsagar/Projects/active/aidaemon
-/opt/homebrew/bin/go run ./cmd/aidaemon/ --login
+cd aidaemon
+go run ./cmd/aidaemon/ --login
 ```
 
 Follow the device code flow to authenticate with GitHub.
