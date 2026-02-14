@@ -164,7 +164,7 @@ func (tb *Bot) handleMessage(ctx context.Context, b *bot.Bot, update *models.Upd
 	// Send placeholder.
 	placeholder, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: chatID,
-		Text:   "🤔 Thinking...",
+		Text:   "⏳ Starting...",
 	})
 	if err != nil {
 		log.Printf("[telegram] send placeholder: %v", err)
@@ -184,12 +184,19 @@ func (tb *Bot) handleMessage(ctx context.Context, b *bot.Bot, update *models.Upd
 
 	// Progress callback: update the placeholder message so the user
 	// can see what's happening during multi-step tool execution.
+	var lastProgressText string
 	var lastProgressUpdate time.Time
 	progressCb := func(update engine.ProgressUpdate) {
-		// Rate-limit edits to avoid Telegram API throttling (~1/sec).
-		if time.Since(lastProgressUpdate) < 2*time.Second {
+		// Skip if the text hasn't changed (avoids "not modified" errors).
+		if update.Message == lastProgressText {
 			return
 		}
+		// Rate-limit edits to avoid Telegram API throttling (~1/sec).
+		if time.Since(lastProgressUpdate) < 1500*time.Millisecond {
+			return
+		}
+		log.Printf("[telegram] progress: %s", update.Message)
+		lastProgressText = update.Message
 		lastProgressUpdate = time.Now()
 		tb.editText(ctx, chatID, placeholder.ID, update.Message)
 	}
@@ -870,13 +877,41 @@ func (tb *Bot) sendHTML(ctx context.Context, chatID int64, text string) {
 }
 
 func (tb *Bot) editText(ctx context.Context, chatID int64, messageID int, text string) {
+	const maxLen = 4096
+
+	if len(text) <= maxLen {
+		_, err := tb.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    chatID,
+			MessageID: messageID,
+			Text:      text,
+		})
+		if err != nil && !isNotModifiedErr(err) {
+			log.Printf("[telegram] edit: %v", err)
+		}
+		return
+	}
+
+	// Message too long — edit the first chunk into the placeholder,
+	// then send remaining chunks as new messages.
+	chunks := splitMessage(text, maxLen)
+
 	_, err := tb.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
 		ChatID:    chatID,
 		MessageID: messageID,
-		Text:      text,
+		Text:      chunks[0],
 	})
 	if err != nil && !isNotModifiedErr(err) {
-		log.Printf("[telegram] edit: %v", err)
+		log.Printf("[telegram] edit (chunk 1): %v", err)
+	}
+
+	for i := 1; i < len(chunks); i++ {
+		_, err := tb.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   chunks[i],
+		})
+		if err != nil {
+			log.Printf("[telegram] send chunk %d: %v", i+1, err)
+		}
 	}
 }
 
@@ -897,6 +932,12 @@ func (tb *Bot) editHTML(ctx context.Context, chatID int64, messageID int, text s
 				tb.editText(ctx, chatID, messageID, stripHTMLTags(text))
 				return
 			}
+			if strings.Contains(err.Error(), "MESSAGE_TOO_LONG") {
+				// HTML tags pushed us over — fall back to plain text which is shorter.
+				log.Printf("[telegram] HTML too long after formatting, falling back to plain text")
+				tb.editText(ctx, chatID, messageID, stripHTMLTags(text))
+				return
+			}
 			log.Printf("[telegram] edit html: %v", err)
 		}
 		return
@@ -906,6 +947,8 @@ func (tb *Bot) editHTML(ctx context.Context, chatID int64, messageID int, text s
 	// then send remaining chunks as new messages.
 	chunks := splitMessage(text, maxLen)
 
+	log.Printf("[telegram] splitting long message (%d bytes) into %d chunks", len(text), len(chunks))
+
 	// First chunk: edit the existing placeholder message.
 	_, err := tb.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
 		ChatID:    chatID,
@@ -914,11 +957,13 @@ func (tb *Bot) editHTML(ctx context.Context, chatID int64, messageID int, text s
 		ParseMode: models.ParseModeHTML,
 	})
 	if err != nil && !isNotModifiedErr(err) {
-		if strings.Contains(err.Error(), "can't parse entities") {
-			tb.editText(ctx, chatID, messageID, stripHTMLTags(text))
-			return
+		if strings.Contains(err.Error(), "can't parse entities") || strings.Contains(err.Error(), "MESSAGE_TOO_LONG") {
+			log.Printf("[telegram] HTML chunk 1 failed, falling back to plain text: %v", err)
+			// Fall back to plain text for THIS chunk only, not the full text.
+			tb.editText(ctx, chatID, messageID, stripHTMLTags(chunks[0]))
+		} else {
+			log.Printf("[telegram] edit html (chunk 1): %v", err)
 		}
-		log.Printf("[telegram] edit html (chunk 1): %v", err)
 	}
 
 	// Remaining chunks: send as new messages.
@@ -1310,11 +1355,17 @@ func (tb *Bot) handlePhotoMessage(ctx context.Context, b *bot.Bot, update *model
 	tb.engine.Executor = &telegramToolExecutor{bot: tb, chatID: chatID}
 
 	// Progress callback for image analysis.
+	var lastImgProgressText string
 	var lastImgProgress time.Time
 	imgProgressCb := func(update engine.ProgressUpdate) {
-		if time.Since(lastImgProgress) < 2*time.Second {
+		if update.Message == lastImgProgressText {
 			return
 		}
+		if time.Since(lastImgProgress) < 1500*time.Millisecond {
+			return
+		}
+		log.Printf("[telegram] progress: %s", update.Message)
+		lastImgProgressText = update.Message
 		lastImgProgress = time.Now()
 		tb.editText(ctx, chatID, placeholder.ID, update.Message)
 	}
