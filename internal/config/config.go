@@ -53,6 +53,23 @@ type Config struct {
 
 	// Log level: "debug", "info", "warn", "error" (default: "info").
 	LogLevel string `json:"log_level"`
+
+	// Tool permission rules (optional). See permissions package.
+	ToolPermissions map[string]ToolPermissionRule `json:"tool_permissions,omitempty"`
+
+	// Bearer token for the HTTP API (optional). If empty, API is disabled.
+	APIToken string `json:"api_token,omitempty"`
+}
+
+// ToolPermissionRule mirrors permissions.Rule for JSON config.
+type ToolPermissionRule struct {
+	Mode            string   `json:"mode"`
+	AllowedPaths    []string `json:"allowed_paths,omitempty"`
+	DeniedPaths     []string `json:"denied_paths,omitempty"`
+	AllowedCommands []string `json:"allowed_commands,omitempty"`
+	DeniedCommands  []string `json:"denied_commands,omitempty"`
+	AllowedDomains  []string `json:"allowed_domains,omitempty"`
+	DeniedDomains   []string `json:"denied_domains,omitempty"`
 }
 
 // MCPServerConfig describes how to launch an MCP server subprocess.

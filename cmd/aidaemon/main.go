@@ -22,7 +22,9 @@ import (
 
 	"github.com/Ask149/aidaemon/internal/auth"
 	"github.com/Ask149/aidaemon/internal/config"
+	"github.com/Ask149/aidaemon/internal/httpapi"
 	"github.com/Ask149/aidaemon/internal/mcp"
+	"github.com/Ask149/aidaemon/internal/permissions"
 	"github.com/Ask149/aidaemon/internal/provider/copilot"
 	"github.com/Ask149/aidaemon/internal/store"
 	"github.com/Ask149/aidaemon/internal/telegram"
@@ -93,6 +95,17 @@ func run() error {
 	registry := setupTools(cfg)
 	log.Printf("[daemon] built-in tools: %d registered", len(registry.List()))
 
+	// 4a. Audit logger for tool calls.
+	auditPath := filepath.Join(cfg.DataDir, "logs", "audit.log")
+	auditFile, err := os.OpenFile(auditPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		log.Printf("[daemon] warning: could not open audit log %s: %v", auditPath, err)
+	} else {
+		defer auditFile.Close()
+		registry.SetAuditWriter(auditFile)
+		log.Printf("[daemon] audit logging to %s", auditPath)
+	}
+
 	// 4b. MCP servers — launch subprocesses and register their tools.
 	// Create context early so MCP servers can use it for lifecycle.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -158,6 +171,26 @@ func run() error {
 	// 7. Start — bot blocks until ctx is cancelled.
 	log.Println("[daemon] starting — send a Telegram message to chat")
 
+	// 7a. HTTP API (optional — requires api_token and port > 0).
+	if cfg.APIToken != "" && cfg.Port > 0 {
+		api := httpapi.New(httpapi.Config{
+			Port:     cfg.Port,
+			Token:    cfg.APIToken,
+			Store:    st,
+			Registry: registry,
+			Provider: prov,
+			Model:    cfg.ChatModel,
+			SysPrompt: cfg.SystemPrompt,
+		})
+		go func() {
+			if err := api.Start(ctx); err != nil {
+				log.Printf("[httpapi] error: %v", err)
+			}
+		}()
+	} else if cfg.Port > 0 {
+		log.Printf("[daemon] HTTP API disabled (set api_token in config to enable)")
+	}
+
 	// Bot.Start blocks until ctx is cancelled.
 	tbot.Start(ctx)
 
@@ -177,7 +210,26 @@ func run() error {
 
 // setupTools creates and configures the tool registry.
 func setupTools(cfg *config.Config) *tools.Registry {
-	registry := tools.NewRegistry()
+	// Build permission checker from config.
+	var perms *permissions.Checker
+	if len(cfg.ToolPermissions) > 0 {
+		rules := make(map[string]permissions.Rule)
+		for name, rule := range cfg.ToolPermissions {
+			rules[name] = permissions.Rule{
+				Mode:            permissions.Mode(rule.Mode),
+				AllowedPaths:    rule.AllowedPaths,
+				DeniedPaths:     rule.DeniedPaths,
+				AllowedCommands: rule.AllowedCommands,
+				DeniedCommands:  rule.DeniedCommands,
+				AllowedDomains:  rule.AllowedDomains,
+				DeniedDomains:   rule.DeniedDomains,
+			}
+		}
+		perms = permissions.NewChecker(rules)
+		log.Printf("[daemon] permissions: %d tool rules loaded", len(rules))
+	}
+
+	registry := tools.NewRegistry(perms)
 
 	home, _ := os.UserHomeDir()
 

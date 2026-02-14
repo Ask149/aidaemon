@@ -5,20 +5,30 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"sync"
+	"time"
+
+	"github.com/Ask149/aidaemon/internal/permissions"
 )
 
 // Registry manages all available tools and handles execution.
 type Registry struct {
-	mu    sync.RWMutex
-	tools map[string]Tool
+	mu      sync.RWMutex
+	tools   map[string]Tool
+	perms   *permissions.Checker
+	audit   io.Writer // audit log writer (nil = disabled)
 }
 
 // NewRegistry creates an empty tool registry.
-func NewRegistry() *Registry {
+func NewRegistry(perms *permissions.Checker) *Registry {
+	if perms == nil {
+		perms = permissions.NewChecker(nil)
+	}
 	return &Registry{
 		tools: make(map[string]Tool),
+		perms: perms,
 	}
 }
 
@@ -74,8 +84,9 @@ func (r *Registry) Definitions() []ToolDefinition {
 // This method:
 // 1. Looks up the tool by name
 // 2. Parses the JSON arguments
-// 3. Executes the tool
-// 4. Returns the result or error
+// 3. Checks permissions
+// 4. Executes the tool
+// 5. Returns the result or error
 func (r *Registry) Execute(ctx context.Context, toolName string, argsJSON string) (string, error) {
 	// Look up tool.
 	tool := r.Get(toolName)
@@ -91,17 +102,108 @@ func (r *Registry) Execute(ctx context.Context, toolName string, argsJSON string
 		}
 	}
 
+	// Check permissions.
+	if err := r.checkPermissions(toolName, args); err != nil {
+		log.Printf("[tools] permission denied: %s: %v", toolName, err)
+		r.auditLog("DENIED", toolName, argsJSON, 0, err)
+		return "", err
+	}
+
 	log.Printf("[tools] executing: %s %v", toolName, args)
+	r.auditLog("CALL", toolName, argsJSON, 0, nil)
 
 	// Execute tool.
+	start := time.Now()
 	result, err := tool.Execute(ctx, args)
+	elapsed := time.Since(start)
+
 	if err != nil {
 		log.Printf("[tools] error: %s: %v", toolName, err)
+		r.auditLog("ERROR", toolName, "", elapsed, err)
 		return "", fmt.Errorf("tool execution failed: %w", err)
 	}
 
 	log.Printf("[tools] success: %s (%d bytes)", toolName, len(result))
+	r.auditLog("OK", toolName, fmt.Sprintf("%d bytes", len(result)), elapsed, nil)
 	return result, nil
+}
+
+// Permissions returns the checker for external use.
+func (r *Registry) Permissions() *permissions.Checker {
+	return r.perms
+}
+
+// SetAuditWriter enables audit logging to the given writer.
+// Pass nil to disable audit logging.
+func (r *Registry) SetAuditWriter(w io.Writer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.audit = w
+}
+
+// auditLog writes a structured audit entry if an audit writer is configured.
+// Format: 2024-01-15T10:30:00Z STATUS tool_name detail [duration] [error]
+func (r *Registry) auditLog(status, toolName, detail string, elapsed time.Duration, err error) {
+	r.mu.RLock()
+	w := r.audit
+	r.mu.RUnlock()
+
+	if w == nil {
+		return
+	}
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	entry := fmt.Sprintf("%s %s %s", ts, status, toolName)
+	if detail != "" {
+		entry += " " + detail
+	}
+	if elapsed > 0 {
+		entry += fmt.Sprintf(" (%s)", elapsed.Round(time.Millisecond))
+	}
+	if err != nil {
+		entry += fmt.Sprintf(" err=%v", err)
+	}
+	entry += "\n"
+
+	// Best-effort write; don't block tool execution on audit failure.
+	if _, werr := io.WriteString(w, entry); werr != nil {
+		log.Printf("[audit] write failed: %v", werr)
+	}
+}
+
+// checkPermissions enforces permission rules based on tool arguments.
+func (r *Registry) checkPermissions(toolName string, args map[string]interface{}) error {
+	// Check path-based arguments.
+	for _, key := range []string{"path", "file_path", "filename", "directory"} {
+		if v, ok := args[key]; ok {
+			if s, ok := v.(string); ok {
+				if err := r.perms.CheckPath(toolName, s); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	// Check command-based arguments.
+	for _, key := range []string{"command", "cmd"} {
+		if v, ok := args[key]; ok {
+			if s, ok := v.(string); ok {
+				if err := r.perms.CheckCommand(toolName, s); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	// Check URL/domain-based arguments.
+	for _, key := range []string{"url", "uri"} {
+		if v, ok := args[key]; ok {
+			if s, ok := v.(string); ok {
+				if err := r.perms.CheckDomain(toolName, s); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // ExecuteAll executes multiple tool calls in sequence.
