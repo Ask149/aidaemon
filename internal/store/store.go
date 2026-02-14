@@ -22,15 +22,59 @@ type Message struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// Store wraps a SQLite database for conversation history.
-type Store struct {
+// MessageWithID is a Message with its database row ID.
+type MessageWithID struct {
+	ID        int64     `json:"id"`
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Conversation defines the interface for conversation persistence.
+// Any backend (SQLite, PostgreSQL, in-memory) can implement this.
+type Conversation interface {
+	// GetHistory returns the last N messages for a chat, ordered oldest→newest.
+	GetHistory(chatID string) ([]Message, error)
+
+	// AddMessage appends a message and trims old ones beyond the limit.
+	AddMessage(chatID, role, content string) error
+
+	// ClearChat deletes all messages for a chat.
+	ClearChat(chatID string) error
+
+	// MessageCount returns how many messages are stored for a chat.
+	MessageCount(chatID string) (int, error)
+
+	// GetOldestN returns the oldest N messages for a chat (for compaction).
+	GetOldestN(chatID string, n int) ([]MessageWithID, error)
+
+	// ReplaceMessages deletes messages with the given IDs and inserts a
+	// replacement message (typically a summary).
+	ReplaceMessages(chatID string, deleteIDs []int64, role, content string) error
+
+	// Limit returns the configured max messages per chat.
+	Limit() int
+
+	// Close closes the underlying storage.
+	Close() error
+}
+
+// Store is an alias for SQLiteStore for backward compatibility.
+// Existing code using *store.Store continues to work unchanged.
+type Store = SQLiteStore
+
+// SQLiteStore wraps a SQLite database for conversation history.
+type SQLiteStore struct {
 	db    *sql.DB
 	limit int // max messages per chat
 }
 
+// Compile-time check: *SQLiteStore implements Conversation.
+var _ Conversation = (*SQLiteStore)(nil)
+
 // New opens (or creates) a SQLite database at path.
 // limit is the max number of messages kept per conversation.
-func New(path string, limit int) (*Store, error) {
+func New(path string, limit int) (*SQLiteStore, error) {
 	// Ensure directory exists.
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, fmt.Errorf("create db directory: %w", err)
@@ -53,7 +97,7 @@ func New(path string, limit int) (*Store, error) {
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
-	s := &Store{db: db, limit: limit}
+	s := &SQLiteStore{db: db, limit: limit}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
@@ -63,12 +107,12 @@ func New(path string, limit int) (*Store, error) {
 }
 
 // Close closes the database connection.
-func (s *Store) Close() error {
+func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
 
 // migrate creates tables if they don't exist.
-func (s *Store) migrate() error {
+func (s *SQLiteStore) migrate() error {
 	_, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS conversations (
 			id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +128,7 @@ func (s *Store) migrate() error {
 }
 
 // GetHistory returns the last N messages for a chat, ordered oldest→newest.
-func (s *Store) GetHistory(chatID string) ([]Message, error) {
+func (s *SQLiteStore) GetHistory(chatID string) ([]Message, error) {
 	rows, err := s.db.Query(`
 		SELECT role, content, created_at FROM conversations
 		WHERE chat_id = ?
@@ -116,7 +160,7 @@ func (s *Store) GetHistory(chatID string) ([]Message, error) {
 }
 
 // AddMessage appends a message and trims old ones beyond the limit.
-func (s *Store) AddMessage(chatID, role, content string) error {
+func (s *SQLiteStore) AddMessage(chatID, role, content string) error {
 	now := time.Now().Unix()
 
 	if _, err := s.db.Exec(`
@@ -143,13 +187,13 @@ func (s *Store) AddMessage(chatID, role, content string) error {
 }
 
 // ClearChat deletes all messages for a chat.
-func (s *Store) ClearChat(chatID string) error {
+func (s *SQLiteStore) ClearChat(chatID string) error {
 	_, err := s.db.Exec("DELETE FROM conversations WHERE chat_id = ?", chatID)
 	return err
 }
 
 // MessageCount returns how many messages are stored for a chat.
-func (s *Store) MessageCount(chatID string) (int, error) {
+func (s *SQLiteStore) MessageCount(chatID string) (int, error) {
 	var count int
 	err := s.db.QueryRow(
 		"SELECT COUNT(*) FROM conversations WHERE chat_id = ?", chatID,
@@ -158,12 +202,12 @@ func (s *Store) MessageCount(chatID string) (int, error) {
 }
 
 // Limit returns the configured max messages per chat.
-func (s *Store) Limit() int {
+func (s *SQLiteStore) Limit() int {
 	return s.limit
 }
 
 // GetOldestN returns the oldest N messages for a chat (for compaction).
-func (s *Store) GetOldestN(chatID string, n int) ([]MessageWithID, error) {
+func (s *SQLiteStore) GetOldestN(chatID string, n int) ([]MessageWithID, error) {
 	rows, err := s.db.Query(`
 		SELECT id, role, content, created_at FROM conversations
 		WHERE chat_id = ?
@@ -191,7 +235,7 @@ func (s *Store) GetOldestN(chatID string, n int) ([]MessageWithID, error) {
 // ReplaceMessages deletes messages with the given IDs and inserts a
 // replacement message (typically a summary). The replacement gets the
 // timestamp of the oldest deleted message so it sorts correctly.
-func (s *Store) ReplaceMessages(chatID string, deleteIDs []int64, role, content string) error {
+func (s *SQLiteStore) ReplaceMessages(chatID string, deleteIDs []int64, role, content string) error {
 	if len(deleteIDs) == 0 {
 		return nil
 	}
@@ -231,14 +275,6 @@ func (s *Store) ReplaceMessages(chatID string, deleteIDs []int64, role, content 
 	}
 
 	return tx.Commit()
-}
-
-// MessageWithID is a Message with its database row ID.
-type MessageWithID struct {
-	ID        int64     `json:"id"`
-	Role      string    `json:"role"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
 }
 
 // placeholders returns "?,?,?" for n items.

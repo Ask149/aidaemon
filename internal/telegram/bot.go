@@ -23,6 +23,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"github.com/Ask149/aidaemon/internal/engine"
 	"github.com/Ask149/aidaemon/internal/mcp"
 	"github.com/Ask149/aidaemon/internal/provider"
 	"github.com/Ask149/aidaemon/internal/store"
@@ -35,6 +36,7 @@ type Bot struct {
 	provider  provider.Provider
 	store     *store.Store
 	tools     *tools.Registry
+	engine    *engine.Engine
 	userID    int64
 	model     string
 	sysPrompt string
@@ -71,6 +73,12 @@ func New(cfg Config) (*Bot, error) {
 		convLimit: cfg.ConvLimit,
 		botToken:  cfg.Token,
 		dataDir:   cfg.DataDir,
+	}
+
+	// Initialize the chat engine for tool-call orchestration.
+	tb.engine = &engine.Engine{
+		Provider: cfg.Provider,
+		Registry: cfg.ToolRegistry,
 	}
 
 	opts := []bot.Option{
@@ -169,125 +177,56 @@ func (tb *Bot) handleMessage(ctx context.Context, b *bot.Bot, update *models.Upd
 		return
 	}
 
-	// Tool execution loop: keep an in-memory message list so tool_call IDs
-	// and assistant tool_calls are preserved across iterations.
-	// High limit (999) to support long Playwright browsing sessions.
-	maxIterations := 999
-	for i := 0; i < maxIterations; i++ {
-		// Build request with tools (if registry available).
-		req := provider.ChatRequest{
-			Model:    tb.model,
-			Messages: messages,
-		}
-		if tb.tools != nil {
-			req.Tools = tb.toolDefinitions()
-		}
+	// Set up Telegram-aware tool executor (handles MCP screenshots, etc.).
+	tb.engine.Executor = &telegramToolExecutor{bot: tb, chatID: chatID}
 
-		// Call LLM (non-streaming for tool calls).
-		log.Printf("[telegram] calling LLM (iteration %d, %d messages)", i+1, len(messages))
-		resp, err := tb.provider.Chat(ctx, req)
-		if err != nil {
-			log.Printf("[telegram] chat error: %v", err)
-			tb.editText(ctx, chatID, placeholder.ID, fmt.Sprintf("❌ %v", err))
-			return
-		}
-		log.Printf("[telegram] LLM response: finish_reason=%s, tool_calls=%d, content_len=%d",
-			resp.FinishReason, len(resp.ToolCalls), len(resp.Content))
-
-		// Check if LLM wants to call tools.
-		if len(resp.ToolCalls) > 0 {
-			// Build tool name summary for the status message.
-			toolNames := make([]string, len(resp.ToolCalls))
-			for j, tc := range resp.ToolCalls {
-				toolNames[j] = tc.Function.Name
-			}
-			tb.editText(ctx, chatID, placeholder.ID,
-				fmt.Sprintf("🔧 Using: %s ...", strings.Join(toolNames, ", ")))
-
-			// Append assistant message WITH tool_calls to in-memory history.
-			// This is critical: the API requires the assistant message that
-			// contains tool_calls to be followed by matching tool result messages.
-			assistantMsg := provider.Message{
-				Role:      "assistant",
-				Content:   resp.Content, // may be empty, that's fine
-				ToolCalls: resp.ToolCalls,
-			}
-			messages = append(messages, assistantMsg)
-
-			// Execute tools and append results to in-memory history.
-			toolResultMsgs := tb.executeToolsForChat(ctx, chatID, resp.ToolCalls)
-			messages = append(messages, toolResultMsgs...)
-
-			// Loop: LLM will see tool results and continue.
-			continue
-		}
-
-		// No tool calls → final response.
-		if resp.Content == "" {
-			tb.editText(ctx, chatID, placeholder.ID, "⚠️ Empty response from AI.")
-			return
-		}
-
-		// Save final assistant response to persistent store.
-		if err := tb.store.AddMessage(chatIDStr, "assistant", resp.Content); err != nil {
-			log.Printf("[telegram] save assistant msg: %v", err)
-		}
-
-		// Also save a summary of tool usage to the store for context continuity.
-		// (The full tool_call details are only in-memory for the current request.)
-		if i > 0 {
-			// There were tool calls in earlier iterations; save a brief summary.
-			if err := tb.store.AddMessage(chatIDStr, "assistant", "[Used tools to answer this question]"); err != nil {
-				log.Printf("[telegram] save tool summary: %v", err)
-			}
-		}
-
-		// Compact old messages if approaching the limit.
-		go tb.compactIfNeeded(ctx, chatIDStr)
-
-		// Append usage footer.
-		footer := ""
-		if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 {
-			footer = fmt.Sprintf("\n\n📊 %d→%d tokens | %s",
-				resp.Usage.InputTokens, resp.Usage.OutputTokens, tb.model)
-		}
-
-		// Format as HTML for rich output (bold, code, links, etc.).
-		formatted := FormatHTML(resp.Content + footer)
-		tb.editHTML(ctx, chatID, placeholder.ID, formatted)
-		return
-	}
-
-	// Max iterations reached — ask LLM to summarize what was accomplished.
-	tb.editText(ctx, chatID, placeholder.ID, "⏳ Wrapping up (reached iteration limit)...")
-	summaryMessages := append(messages, provider.Message{
-		Role:    "user",
-		Content: "You've reached the tool execution limit. Please summarize what you accomplished and what remains to be done, without calling any more tools.",
+	// Delegate to the chat engine for the tool-call loop.
+	result, err := tb.engine.Run(ctx, messages, engine.RunOptions{
+		Model: tb.model,
 	})
-	summaryReq := provider.ChatRequest{
-		Model:    tb.model,
-		Messages: summaryMessages,
-		// No tools — force a text-only response.
-	}
-	summaryResp, err := tb.provider.Chat(ctx, summaryReq)
-	if err != nil || summaryResp.Content == "" {
-		tb.editText(ctx, chatID, placeholder.ID, "⚠️ Tool execution limit reached. Could not generate summary.")
+
+	// Handle engine-level errors.
+	if err != nil {
+		log.Printf("[telegram] engine error: %v", err)
+		if result != nil && result.Content != "" {
+			// Partial result (e.g., summary after max iterations).
+			goto sendResult
+		}
+		tb.editText(ctx, chatID, placeholder.ID, fmt.Sprintf("❌ %v", err))
 		return
 	}
 
-	if err := tb.store.AddMessage(chatIDStr, "assistant", summaryResp.Content); err != nil {
-		log.Printf("[telegram] save summary msg: %v", err)
-	}
-	if err := tb.store.AddMessage(chatIDStr, "assistant", "[Used tools to answer this question]"); err != nil {
-		log.Printf("[telegram] save tool summary: %v", err)
+	// Empty response.
+	if result.Content == "" {
+		tb.editText(ctx, chatID, placeholder.ID, "⚠️ Empty response from AI.")
+		return
 	}
 
-	footer := ""
-	if summaryResp.Usage.InputTokens > 0 || summaryResp.Usage.OutputTokens > 0 {
-		footer = fmt.Sprintf("\n\n📊 %d→%d tokens | %s",
-			summaryResp.Usage.InputTokens, summaryResp.Usage.OutputTokens, tb.model)
+sendResult:
+	// Save final assistant response to persistent store.
+	if err := tb.store.AddMessage(chatIDStr, "assistant", result.Content); err != nil {
+		log.Printf("[telegram] save assistant msg: %v", err)
 	}
-	formatted := FormatHTML(summaryResp.Content + footer)
+
+	// Save a summary of tool usage for context continuity.
+	if result.ToolIterations > 0 {
+		if err := tb.store.AddMessage(chatIDStr, "assistant", "[Used tools to answer this question]"); err != nil {
+			log.Printf("[telegram] save tool summary: %v", err)
+		}
+	}
+
+	// Compact old messages if approaching the limit.
+	go tb.compactIfNeeded(ctx, chatIDStr)
+
+	// Append usage footer.
+	footer := ""
+	if result.Usage != nil && (result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
+		footer = fmt.Sprintf("\n\n📊 %d→%d tokens | %s",
+			result.Usage.InputTokens, result.Usage.OutputTokens, tb.model)
+	}
+
+	// Format as HTML for rich output (bold, code, links, etc.).
+	formatted := FormatHTML(result.Content + footer)
 	tb.editHTML(ctx, chatID, placeholder.ID, formatted)
 }
 
@@ -673,35 +612,17 @@ func stripHTMLTags(s string) string {
 
 // --- Tool support ---
 
-// toolDefinitions converts the tool registry to OpenAI format.
-func (tb *Bot) toolDefinitions() []provider.ToolDef {
-	if tb.tools == nil {
-		return nil
-	}
-
-	toolList := tb.tools.List()
-	defs := make([]provider.ToolDef, len(toolList))
-
-	for i, tool := range toolList {
-		defs[i] = provider.ToolDef{
-			Type: "function",
-			Function: provider.FuncDef{
-				Name:        tool.Name(),
-				Description: tool.Description(),
-				Parameters:  tool.Parameters(),
-			},
-		}
-	}
-
-	return defs
+// telegramToolExecutor implements engine.ToolExecutor and delegates to
+// executeToolsForChat so that MCP screenshots and Playwright auto-screenshots
+// are sent to the correct Telegram chat.
+type telegramToolExecutor struct {
+	bot    *Bot
+	chatID int64
 }
 
-// executeTools executes tool calls and returns results as provider.Messages
-// with proper tool_call_id fields for the OpenAI API format.
-// If a tool result contains [MCP_IMAGE:mime:base64] markers, the image is
-// sent directly to the Telegram chat and replaced with a text reference.
-func (tb *Bot) executeTools(ctx context.Context, toolCalls []provider.ToolCall) []provider.Message {
-	return tb.executeToolsForChat(ctx, 0, toolCalls)
+// ExecuteToolCalls implements engine.ToolExecutor.
+func (e *telegramToolExecutor) ExecuteToolCalls(ctx context.Context, calls []provider.ToolCall) []provider.Message {
+	return e.bot.executeToolsForChat(ctx, e.chatID, calls)
 }
 
 // playwrightAutoScreenshotTools lists Playwright tool names that change
@@ -986,63 +907,41 @@ func (tb *Bot) handlePhotoMessage(ctx context.Context, b *bot.Bot, update *model
 		}
 	}
 
-	// Use the same tool execution loop as regular messages.
-	// High limit (999) to support long Playwright browsing sessions.
-	maxIterations := 999
-	for i := 0; i < maxIterations; i++ {
-		req := provider.ChatRequest{
-			Model:    tb.model,
-			Messages: messages,
-		}
-		if tb.tools != nil {
-			req.Tools = tb.toolDefinitions()
-		}
+	// Delegate to the chat engine for the tool-call loop.
+	tb.engine.Executor = &telegramToolExecutor{bot: tb, chatID: chatID}
+	result, err := tb.engine.Run(ctx, messages, engine.RunOptions{Model: tb.model})
 
-		log.Printf("[telegram] image: calling LLM (iteration %d, %d messages)", i+1, len(messages))
-		resp, err := tb.provider.Chat(ctx, req)
-		if err != nil {
-			log.Printf("[telegram] image chat error: %v", err)
-			tb.editText(ctx, chatID, placeholder.ID, fmt.Sprintf("❌ %v", err))
-			return
+	if err != nil {
+		log.Printf("[telegram] image engine error: %v", err)
+		if result != nil && result.Content != "" {
+			goto sendImageResult
 		}
-
-		if len(resp.ToolCalls) > 0 {
-			toolNames := make([]string, len(resp.ToolCalls))
-			for j, tc := range resp.ToolCalls {
-				toolNames[j] = tc.Function.Name
-			}
-			tb.editText(ctx, chatID, placeholder.ID,
-				fmt.Sprintf("🔧 Using: %s ...", strings.Join(toolNames, ", ")))
-
-			messages = append(messages, provider.Message{
-				Role:      "assistant",
-				Content:   resp.Content,
-				ToolCalls: resp.ToolCalls,
-			})
-			toolResultMsgs := tb.executeToolsForChat(ctx, chatID, resp.ToolCalls)
-			messages = append(messages, toolResultMsgs...)
-			continue
-		}
-
-		if resp.Content == "" {
-			tb.editText(ctx, chatID, placeholder.ID, "⚠️ Empty response from AI.")
-			return
-		}
-
-		if err := tb.store.AddMessage(chatIDStr, "assistant", resp.Content); err != nil {
-			log.Printf("[telegram] save assistant msg: %v", err)
-		}
-
-		footer := ""
-		if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 {
-			footer = fmt.Sprintf("\n\n📊 %d→%d tokens | %s",
-				resp.Usage.InputTokens, resp.Usage.OutputTokens, tb.model)
-		}
-
-		formatted := FormatHTML(resp.Content + footer)
-		tb.editHTML(ctx, chatID, placeholder.ID, formatted)
+		tb.editText(ctx, chatID, placeholder.ID, fmt.Sprintf("❌ %v", err))
 		return
 	}
 
-	tb.editText(ctx, chatID, placeholder.ID, "⚠️ Tool execution limit reached while analyzing image.")
+	if result.Content == "" {
+		tb.editText(ctx, chatID, placeholder.ID, "⚠️ Empty response from AI.")
+		return
+	}
+
+sendImageResult:
+	if err := tb.store.AddMessage(chatIDStr, "assistant", result.Content); err != nil {
+		log.Printf("[telegram] save assistant msg: %v", err)
+	}
+
+	if result.ToolIterations > 0 {
+		if err := tb.store.AddMessage(chatIDStr, "assistant", "[Used tools to answer this question]"); err != nil {
+			log.Printf("[telegram] save tool summary: %v", err)
+		}
+	}
+
+	footer := ""
+	if result.Usage != nil && (result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
+		footer = fmt.Sprintf("\n\n📊 %d→%d tokens | %s",
+			result.Usage.InputTokens, result.Usage.OutputTokens, tb.model)
+	}
+
+	formatted := FormatHTML(result.Content + footer)
+	tb.editHTML(ctx, chatID, placeholder.ID, formatted)
 }

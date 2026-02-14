@@ -11,9 +11,12 @@
 .idea/
 .vscode/
 *.swp
+*.code-workspace
 
 # Go
 /vendor/
+coverage.out
+coverage.html
 
 # Auth (never commit tokens)
 auth.json

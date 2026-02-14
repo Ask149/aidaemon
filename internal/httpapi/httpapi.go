@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Ask149/aidaemon/internal/engine"
 	"github.com/Ask149/aidaemon/internal/provider"
 	"github.com/Ask149/aidaemon/internal/store"
 	"github.com/Ask149/aidaemon/internal/tools"
@@ -39,12 +40,19 @@ type Config struct {
 // API is the HTTP server.
 type API struct {
 	cfg    Config
+	engine *engine.Engine
 	server *http.Server
 }
 
 // New creates an HTTP API server.
 func New(cfg Config) *API {
-	api := &API{cfg: cfg}
+	api := &API{
+		cfg: cfg,
+		engine: &engine.Engine{
+			Provider: cfg.Provider,
+			Registry: cfg.Registry,
+		},
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", api.handleHealth)
@@ -159,66 +167,36 @@ func (a *API) handleChat(w http.ResponseWriter, r *http.Request) {
 		messages = append(messages, provider.Message{Role: m.Role, Content: m.Content})
 	}
 
-	// Build tool definitions.
-	var toolDefs []provider.ToolDef
-	for _, def := range a.cfg.Registry.Definitions() {
-		toolDefs = append(toolDefs, provider.ToolDef{
-			Type: "function",
-			Function: provider.FuncDef{
-				Name:        def.Function.Name,
-				Description: def.Function.Description,
-				Parameters:  def.Function.Parameters,
-			},
-		})
-	}
-
-	// Call LLM (with tool loop, max 25 iterations for API).
-	var toolCallNames []string
-	for i := 0; i < 25; i++ {
-		resp, err := a.cfg.Provider.Chat(r.Context(), provider.ChatRequest{
-			Model:    a.cfg.Model,
-			Messages: messages,
-			Tools:    toolDefs,
-		})
-		if err != nil {
-			jsonError(w, http.StatusBadGateway, "LLM error: "+err.Error())
-			return
-		}
-
-		// No tool calls — we have the final response.
-		if len(resp.ToolCalls) == 0 {
-			// Save and return assistant reply.
-			if err := a.cfg.Store.AddMessage(req.SessionID, "assistant", resp.Content); err != nil {
-				log.Printf("[httpapi] store error: %v", err)
+	// Delegate to the chat engine (max 25 iterations for API).
+	result, err := a.engine.Run(r.Context(), messages, engine.RunOptions{
+		Model:         a.cfg.Model,
+		MaxIterations: 25,
+	})
+	if err != nil {
+		statusCode := http.StatusBadGateway
+		if result != nil && result.Content != "" {
+			// Partial result (e.g., max iterations reached with summary).
+			if saveErr := a.cfg.Store.AddMessage(req.SessionID, "assistant", result.Content); saveErr != nil {
+				log.Printf("[httpapi] store error: %v", saveErr)
 			}
 			jsonResp(w, http.StatusOK, chatResponse{
-				Reply:     resp.Content,
-				ToolCalls: toolCallNames,
+				Reply:     result.Content,
+				ToolCalls: result.ToolNames,
 			})
 			return
 		}
-
-		// Execute tool calls.
-		messages = append(messages, provider.Message{
-			Role:      "assistant",
-			ToolCalls: resp.ToolCalls,
-		})
-
-		for _, tc := range resp.ToolCalls {
-			toolCallNames = append(toolCallNames, tc.Function.Name)
-			result, execErr := a.cfg.Registry.Execute(r.Context(), tc.Function.Name, tc.Function.Arguments)
-			if execErr != nil {
-				result = fmt.Sprintf("error: %v", execErr)
-			}
-			messages = append(messages, provider.Message{
-				Role:       "tool",
-				Content:    result,
-				ToolCallID: tc.ID,
-			})
-		}
+		jsonError(w, statusCode, "LLM error: "+err.Error())
+		return
 	}
 
-	jsonError(w, http.StatusInternalServerError, "tool loop exceeded 25 iterations")
+	// Save and return assistant reply.
+	if err := a.cfg.Store.AddMessage(req.SessionID, "assistant", result.Content); err != nil {
+		log.Printf("[httpapi] store error: %v", err)
+	}
+	jsonResp(w, http.StatusOK, chatResponse{
+		Reply:     result.Content,
+		ToolCalls: result.ToolNames,
+	})
 }
 
 type sessionInfo struct {

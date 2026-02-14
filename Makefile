@@ -1,4 +1,4 @@
-.PHONY: build install run test vet clean lint check
+.PHONY: build install run test vet clean lint check cover
 
 # Build the daemon binary
 build:
@@ -42,6 +42,12 @@ restart:
 	go install ./cmd/aidaemon/
 	aidaemon &
 	@echo "Restarted"
+
+# Test coverage report (opens in browser)
+cover:
+	go test ./... -coverprofile=coverage.out
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report: coverage.html"
 
 # Install the pre-commit hook
 hooks:
