@@ -23,3 +23,12 @@ auth.json
 
 # Pre-commit hook patterns (contains personal info)
 .githooks/blocked-patterns.txt
+
+# AI context & instructions (local-only, symlinked to ~/.config/ai/)
+context/
+.github/copilot-instructions.md
+AGENTS.md
+CLAUDE.md
+.clinerules
+.cursor/
+.cline/
