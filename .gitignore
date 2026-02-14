@@ -17,3 +17,6 @@
 
 # Auth (never commit tokens)
 auth.json
+
+# Pre-commit hook patterns (contains personal info)
+.githooks/blocked-patterns.txt
