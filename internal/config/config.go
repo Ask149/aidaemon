@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -22,7 +23,7 @@ type Config struct {
 	// Messages from other users are silently dropped.
 	TelegramUserID int64 `json:"telegram_user_id"`
 
-	// Model to use for chat (default: "gpt-4o").
+	// Model to use for chat (default: "claude-opus-4.6").
 	ChatModel string `json:"chat_model"`
 
 	// Maximum conversation messages to keep per chat (default: 20).
@@ -37,14 +38,35 @@ type Config struct {
 	// Database path (default: ~/.config/aidaemon/aidaemon.db).
 	DBPath string `json:"db_path"`
 
+	// Data directory for media, logs, etc. (default: ~/.config/aidaemon/data).
+	DataDir string `json:"data_dir"`
+
+	// Brave Search API key (optional — enables higher-quality web search).
+	// Get a free key at https://brave.com/search/api/ (2000 queries/month).
+	// When empty, web_search falls back to DuckDuckGo HTML scraping.
+	BraveAPIKey string `json:"brave_api_key"`
+
+	// MCP servers to connect to on startup.
+	// Each key is a server name; value describes how to launch it.
+	// Example: {"playwright": {"command": "npx", "args": ["-y", "@playwright/mcp@latest", "--headless"]}}
+	MCPServers map[string]MCPServerConfig `json:"mcp_servers"`
+
 	// Log level: "debug", "info", "warn", "error" (default: "info").
 	LogLevel string `json:"log_level"`
+}
+
+// MCPServerConfig describes how to launch an MCP server subprocess.
+type MCPServerConfig struct {
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"env,omitempty"`
+	Enabled *bool             `json:"enabled,omitempty"`
 }
 
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		ChatModel:               "gpt-4o",
+		ChatModel:               "claude-sonnet-4.5",
 		MaxConversationMessages: 20,
 		SystemPrompt:            "You are a helpful personal assistant. Be concise and direct.",
 		Port:                    8420,
@@ -92,6 +114,18 @@ func Load() (*Config, error) {
 		dir, _ := configDir()
 		cfg.DBPath = filepath.Join(dir, "aidaemon.db")
 	}
+
+	// Resolve default data directory and ensure subdirectories exist.
+	if cfg.DataDir == "" {
+		dir, _ := configDir()
+		cfg.DataDir = filepath.Join(dir, "data")
+	}
+	for _, sub := range []string{"media", "logs", "files"} {
+		os.MkdirAll(filepath.Join(cfg.DataDir, sub), 0700)
+	}
+
+	// Load system prompt from file if it exists.
+	cfg.SystemPrompt = loadSystemPrompt(cfg.SystemPrompt)
 
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("config validation: %w", err)
@@ -141,4 +175,24 @@ func configPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "config.json"), nil
+}
+
+// loadSystemPrompt loads system prompt from file if it exists.
+// If prompt is empty or starts with "@", tries to load from:
+//   ~/.config/aidaemon/system_prompt.md
+func loadSystemPrompt(prompt string) string {
+	if prompt == "" || strings.HasPrefix(prompt, "@") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return prompt
+		}
+		
+		promptPath := filepath.Join(home, ".config", "aidaemon", "system_prompt.md")
+		data, err := os.ReadFile(promptPath)
+		if err == nil {
+			return string(data)
+		}
+	}
+	
+	return prompt
 }

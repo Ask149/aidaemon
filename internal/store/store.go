@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -154,4 +155,105 @@ func (s *Store) MessageCount(chatID string) (int, error) {
 		"SELECT COUNT(*) FROM conversations WHERE chat_id = ?", chatID,
 	).Scan(&count)
 	return count, err
+}
+
+// Limit returns the configured max messages per chat.
+func (s *Store) Limit() int {
+	return s.limit
+}
+
+// GetOldestN returns the oldest N messages for a chat (for compaction).
+func (s *Store) GetOldestN(chatID string, n int) ([]MessageWithID, error) {
+	rows, err := s.db.Query(`
+		SELECT id, role, content, created_at FROM conversations
+		WHERE chat_id = ?
+		ORDER BY created_at ASC
+		LIMIT ?
+	`, chatID, n)
+	if err != nil {
+		return nil, fmt.Errorf("query oldest: %w", err)
+	}
+	defer rows.Close()
+
+	var msgs []MessageWithID
+	for rows.Next() {
+		var m MessageWithID
+		var ts int64
+		if err := rows.Scan(&m.ID, &m.Role, &m.Content, &ts); err != nil {
+			return nil, fmt.Errorf("scan row: %w", err)
+		}
+		m.CreatedAt = time.Unix(ts, 0)
+		msgs = append(msgs, m)
+	}
+	return msgs, nil
+}
+
+// ReplaceMessages deletes messages with the given IDs and inserts a
+// replacement message (typically a summary). The replacement gets the
+// timestamp of the oldest deleted message so it sorts correctly.
+func (s *Store) ReplaceMessages(chatID string, deleteIDs []int64, role, content string) error {
+	if len(deleteIDs) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Get the earliest timestamp from the messages being deleted.
+	var minTS int64
+	err = tx.QueryRow(`
+		SELECT MIN(created_at) FROM conversations
+		WHERE chat_id = ? AND id IN (`+placeholders(len(deleteIDs))+`)
+	`, append([]interface{}{chatID}, int64sToInterfaces(deleteIDs)...)...).Scan(&minTS)
+	if err != nil {
+		return fmt.Errorf("get min timestamp: %w", err)
+	}
+
+	// Delete the old messages.
+	_, err = tx.Exec(`
+		DELETE FROM conversations
+		WHERE chat_id = ? AND id IN (`+placeholders(len(deleteIDs))+`)
+	`, append([]interface{}{chatID}, int64sToInterfaces(deleteIDs)...)...)
+	if err != nil {
+		return fmt.Errorf("delete old messages: %w", err)
+	}
+
+	// Insert the summary with the earliest timestamp.
+	_, err = tx.Exec(`
+		INSERT INTO conversations (chat_id, role, content, created_at)
+		VALUES (?, ?, ?, ?)
+	`, chatID, role, content, minTS)
+	if err != nil {
+		return fmt.Errorf("insert summary: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// MessageWithID is a Message with its database row ID.
+type MessageWithID struct {
+	ID        int64     `json:"id"`
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// placeholders returns "?,?,?" for n items.
+func placeholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.Repeat("?,", n-1) + "?"
+}
+
+// int64sToInterfaces converts []int64 to []interface{} for query args.
+func int64sToInterfaces(ids []int64) []interface{} {
+	result := make([]interface{}, len(ids))
+	for i, id := range ids {
+		result[i] = id
+	}
+	return result
 }

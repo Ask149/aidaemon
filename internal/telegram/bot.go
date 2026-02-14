@@ -7,8 +7,14 @@ package telegram
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,8 +23,10 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"github.com/Ask149/aidaemon/internal/mcp"
 	"github.com/Ask149/aidaemon/internal/provider"
 	"github.com/Ask149/aidaemon/internal/store"
+	"github.com/Ask149/aidaemon/internal/tools"
 )
 
 // Bot wraps the Telegram bot with LLM integration.
@@ -26,10 +34,13 @@ type Bot struct {
 	bot       *bot.Bot
 	provider  provider.Provider
 	store     *store.Store
+	tools     *tools.Registry
 	userID    int64
 	model     string
 	sysPrompt string
 	convLimit int
+	botToken  string // needed for file download URLs
+	dataDir   string // root for media/logs/files persistence
 
 	// Guards per-chat to prevent concurrent LLM calls for the same chat.
 	chatMu sync.Map // map[int64]*sync.Mutex
@@ -44,6 +55,8 @@ type Config struct {
 	Model         string
 	SystemPrompt  string
 	ConvLimit     int
+	ToolRegistry  *tools.Registry
+	DataDir       string
 }
 
 // New creates a new Telegram bot. Call Start() to begin polling.
@@ -51,10 +64,13 @@ func New(cfg Config) (*Bot, error) {
 	tb := &Bot{
 		provider:  cfg.Provider,
 		store:     cfg.Store,
+		tools:     cfg.ToolRegistry,
 		userID:    cfg.UserID,
 		model:     cfg.Model,
 		sysPrompt: cfg.SystemPrompt,
 		convLimit: cfg.ConvLimit,
+		botToken:  cfg.Token,
+		dataDir:   cfg.DataDir,
 	}
 
 	opts := []bot.Option{
@@ -97,11 +113,25 @@ func (tb *Bot) getChatMutex(chatID int64) *sync.Mutex {
 // --- Handlers ---
 
 func (tb *Bot) handleMessage(ctx context.Context, b *bot.Bot, update *models.Update) {
-	if update.Message == nil || update.Message.Text == "" {
+	if update.Message == nil {
 		return
 	}
 	if !tb.isAuthorized(update.Message.Chat.ID) {
 		return // silent drop
+	}
+
+	chatID := update.Message.Chat.ID
+	chatIDStr := strconv.FormatInt(chatID, 10)
+
+	// Handle photos (image analysis).
+	if len(update.Message.Photo) > 0 {
+		tb.handlePhotoMessage(ctx, b, update)
+		return
+	}
+
+	// Text messages only from here.
+	if update.Message.Text == "" {
+		return
 	}
 
 	// Skip messages that start with "/" — they're handled by registered handlers.
@@ -109,8 +139,6 @@ func (tb *Bot) handleMessage(ctx context.Context, b *bot.Bot, update *models.Upd
 		return
 	}
 
-	chatID := update.Message.Chat.ID
-	chatIDStr := strconv.FormatInt(chatID, 10)
 	userText := update.Message.Text
 
 	// Serialize LLM calls per chat.
@@ -123,14 +151,6 @@ func (tb *Bot) handleMessage(ctx context.Context, b *bot.Bot, update *models.Upd
 		log.Printf("[telegram] save user msg: %v", err)
 	}
 
-	// Build messages: system prompt + conversation history.
-	messages, err := tb.buildMessages(chatIDStr)
-	if err != nil {
-		log.Printf("[telegram] build messages: %v", err)
-		tb.sendText(ctx, chatID, "❌ Error loading conversation history.")
-		return
-	}
-
 	// Send placeholder.
 	placeholder, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: chatID,
@@ -141,39 +161,134 @@ func (tb *Bot) handleMessage(ctx context.Context, b *bot.Bot, update *models.Upd
 		return
 	}
 
-	// Stream LLM response.
-	req := provider.ChatRequest{
-		Model:    tb.model,
-		Messages: messages,
-	}
-
-	stream, err := tb.provider.Stream(ctx, req)
+	// Build initial messages from conversation history.
+	messages, err := tb.buildMessages(chatIDStr)
 	if err != nil {
-		log.Printf("[telegram] stream error: %v", err)
-		tb.editText(ctx, chatID, placeholder.ID, fmt.Sprintf("❌ %v", err))
+		log.Printf("[telegram] build messages: %v", err)
+		tb.editText(ctx, chatID, placeholder.ID, "❌ Error loading conversation history.")
 		return
 	}
 
-	// Accumulate + edit-message streaming.
-	fullText, usage := tb.streamToTelegram(ctx, chatID, placeholder.ID, stream)
+	// Tool execution loop: keep an in-memory message list so tool_call IDs
+	// and assistant tool_calls are preserved across iterations.
+	// High limit (999) to support long Playwright browsing sessions.
+	maxIterations := 999
+	for i := 0; i < maxIterations; i++ {
+		// Build request with tools (if registry available).
+		req := provider.ChatRequest{
+			Model:    tb.model,
+			Messages: messages,
+		}
+		if tb.tools != nil {
+			req.Tools = tb.toolDefinitions()
+		}
 
-	if fullText == "" {
-		tb.editText(ctx, chatID, placeholder.ID, "⚠️ Empty response from AI.")
+		// Call LLM (non-streaming for tool calls).
+		log.Printf("[telegram] calling LLM (iteration %d, %d messages)", i+1, len(messages))
+		resp, err := tb.provider.Chat(ctx, req)
+		if err != nil {
+			log.Printf("[telegram] chat error: %v", err)
+			tb.editText(ctx, chatID, placeholder.ID, fmt.Sprintf("❌ %v", err))
+			return
+		}
+		log.Printf("[telegram] LLM response: finish_reason=%s, tool_calls=%d, content_len=%d",
+			resp.FinishReason, len(resp.ToolCalls), len(resp.Content))
+
+		// Check if LLM wants to call tools.
+		if len(resp.ToolCalls) > 0 {
+			// Build tool name summary for the status message.
+			toolNames := make([]string, len(resp.ToolCalls))
+			for j, tc := range resp.ToolCalls {
+				toolNames[j] = tc.Function.Name
+			}
+			tb.editText(ctx, chatID, placeholder.ID,
+				fmt.Sprintf("🔧 Using: %s ...", strings.Join(toolNames, ", ")))
+
+			// Append assistant message WITH tool_calls to in-memory history.
+			// This is critical: the API requires the assistant message that
+			// contains tool_calls to be followed by matching tool result messages.
+			assistantMsg := provider.Message{
+				Role:      "assistant",
+				Content:   resp.Content, // may be empty, that's fine
+				ToolCalls: resp.ToolCalls,
+			}
+			messages = append(messages, assistantMsg)
+
+			// Execute tools and append results to in-memory history.
+			toolResultMsgs := tb.executeToolsForChat(ctx, chatID, resp.ToolCalls)
+			messages = append(messages, toolResultMsgs...)
+
+			// Loop: LLM will see tool results and continue.
+			continue
+		}
+
+		// No tool calls → final response.
+		if resp.Content == "" {
+			tb.editText(ctx, chatID, placeholder.ID, "⚠️ Empty response from AI.")
+			return
+		}
+
+		// Save final assistant response to persistent store.
+		if err := tb.store.AddMessage(chatIDStr, "assistant", resp.Content); err != nil {
+			log.Printf("[telegram] save assistant msg: %v", err)
+		}
+
+		// Also save a summary of tool usage to the store for context continuity.
+		// (The full tool_call details are only in-memory for the current request.)
+		if i > 0 {
+			// There were tool calls in earlier iterations; save a brief summary.
+			if err := tb.store.AddMessage(chatIDStr, "assistant", "[Used tools to answer this question]"); err != nil {
+				log.Printf("[telegram] save tool summary: %v", err)
+			}
+		}
+
+		// Compact old messages if approaching the limit.
+		go tb.compactIfNeeded(ctx, chatIDStr)
+
+		// Append usage footer.
+		footer := ""
+		if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 {
+			footer = fmt.Sprintf("\n\n📊 %d→%d tokens | %s",
+				resp.Usage.InputTokens, resp.Usage.OutputTokens, tb.model)
+		}
+
+		// Format as HTML for rich output (bold, code, links, etc.).
+		formatted := FormatHTML(resp.Content + footer)
+		tb.editHTML(ctx, chatID, placeholder.ID, formatted)
 		return
 	}
 
-	// Save assistant response.
-	if err := tb.store.AddMessage(chatIDStr, "assistant", fullText); err != nil {
-		log.Printf("[telegram] save assistant msg: %v", err)
+	// Max iterations reached — ask LLM to summarize what was accomplished.
+	tb.editText(ctx, chatID, placeholder.ID, "⏳ Wrapping up (reached iteration limit)...")
+	summaryMessages := append(messages, provider.Message{
+		Role:    "user",
+		Content: "You've reached the tool execution limit. Please summarize what you accomplished and what remains to be done, without calling any more tools.",
+	})
+	summaryReq := provider.ChatRequest{
+		Model:    tb.model,
+		Messages: summaryMessages,
+		// No tools — force a text-only response.
+	}
+	summaryResp, err := tb.provider.Chat(ctx, summaryReq)
+	if err != nil || summaryResp.Content == "" {
+		tb.editText(ctx, chatID, placeholder.ID, "⚠️ Tool execution limit reached. Could not generate summary.")
+		return
 	}
 
-	// Append usage footer on final edit.
+	if err := tb.store.AddMessage(chatIDStr, "assistant", summaryResp.Content); err != nil {
+		log.Printf("[telegram] save summary msg: %v", err)
+	}
+	if err := tb.store.AddMessage(chatIDStr, "assistant", "[Used tools to answer this question]"); err != nil {
+		log.Printf("[telegram] save tool summary: %v", err)
+	}
+
 	footer := ""
-	if usage != nil {
-		footer = fmt.Sprintf("\n\n<i>📊 %d→%d tokens | %s</i>",
-			usage.InputTokens, usage.OutputTokens, tb.model)
+	if summaryResp.Usage.InputTokens > 0 || summaryResp.Usage.OutputTokens > 0 {
+		footer = fmt.Sprintf("\n\n📊 %d→%d tokens | %s",
+			summaryResp.Usage.InputTokens, summaryResp.Usage.OutputTokens, tb.model)
 	}
-	tb.editHTML(ctx, chatID, placeholder.ID, escapeHTML(fullText)+footer)
+	formatted := FormatHTML(summaryResp.Content + footer)
+	tb.editHTML(ctx, chatID, placeholder.ID, formatted)
 }
 
 func (tb *Bot) handleReset(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -266,6 +381,96 @@ func (tb *Bot) buildMessages(chatIDStr string) ([]provider.Message, error) {
 	}
 
 	return msgs, nil
+}
+
+// compactIfNeeded checks if the conversation has hit the message limit
+// and, if so, summarizes the oldest messages into a single summary message.
+// This preserves context without hard-truncating old messages.
+func (tb *Bot) compactIfNeeded(ctx context.Context, chatIDStr string) {
+	count, err := tb.store.MessageCount(chatIDStr)
+	if err != nil {
+		log.Printf("[compact] count error: %v", err)
+		return
+	}
+
+	limit := tb.store.Limit()
+	// Trigger compaction when we're at 80% of limit.
+	threshold := int(float64(limit) * 0.8)
+	if count < threshold {
+		return
+	}
+
+	// Get the oldest half of messages to summarize.
+	compactCount := count / 2
+	if compactCount < 4 {
+		return // too few to bother
+	}
+
+	oldMsgs, err := tb.store.GetOldestN(chatIDStr, compactCount)
+	if err != nil {
+		log.Printf("[compact] get oldest: %v", err)
+		return
+	}
+
+	// Skip if the first message is already a summary (avoid re-summarizing).
+	if len(oldMsgs) > 0 && strings.HasPrefix(oldMsgs[0].Content, "[Previous conversation summary]") {
+		return
+	}
+
+	// Build a transcript for summarization.
+	var transcript strings.Builder
+	for _, m := range oldMsgs {
+		transcript.WriteString(m.Role)
+		transcript.WriteString(": ")
+		// Truncate very long messages in the transcript.
+		content := m.Content
+		if len(content) > 500 {
+			content = content[:500] + "..."
+		}
+		transcript.WriteString(content)
+		transcript.WriteString("\n")
+	}
+
+	// Use a cheap model for summarization.
+	summaryReq := provider.ChatRequest{
+		Model: "gpt-4o-mini",
+		Messages: []provider.Message{
+			{
+				Role:    "system",
+				Content: "Summarize the following conversation in 2-3 concise paragraphs. Preserve key facts, decisions, file paths, and action items. This summary will replace the original messages in context.",
+			},
+			{
+				Role:    "user",
+				Content: transcript.String(),
+			},
+		},
+	}
+
+	summaryResp, err := tb.provider.Chat(ctx, summaryReq)
+	if err != nil {
+		log.Printf("[compact] summarize error: %v", err)
+		return
+	}
+
+	if summaryResp.Content == "" {
+		log.Printf("[compact] empty summary, skipping")
+		return
+	}
+
+	// Collect IDs to delete.
+	ids := make([]int64, len(oldMsgs))
+	for i, m := range oldMsgs {
+		ids[i] = m.ID
+	}
+
+	// Replace old messages with summary.
+	summaryContent := "[Previous conversation summary]\n" + summaryResp.Content
+	if err := tb.store.ReplaceMessages(chatIDStr, ids, "system", summaryContent); err != nil {
+		log.Printf("[compact] replace error: %v", err)
+		return
+	}
+
+	log.Printf("[compact] compacted %d messages → 1 summary for chat %s", len(oldMsgs), chatIDStr)
 }
 
 // --- Streaming ---
@@ -364,15 +569,81 @@ func (tb *Bot) editText(ctx context.Context, chatID int64, messageID int, text s
 }
 
 func (tb *Bot) editHTML(ctx context.Context, chatID int64, messageID int, text string) {
+	// Telegram messages are limited to 4096 characters.
+	const maxLen = 4096
+
+	if len(text) <= maxLen {
+		_, err := tb.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    chatID,
+			MessageID: messageID,
+			Text:      text,
+			ParseMode: models.ParseModeHTML,
+		})
+		if err != nil && !isNotModifiedErr(err) {
+			if strings.Contains(err.Error(), "can't parse entities") {
+				log.Printf("[telegram] HTML parse failed, falling back to plain text: %v", err)
+				tb.editText(ctx, chatID, messageID, stripHTMLTags(text))
+				return
+			}
+			log.Printf("[telegram] edit html: %v", err)
+		}
+		return
+	}
+
+	// Message too long — edit the first chunk into the placeholder,
+	// then send remaining chunks as new messages.
+	chunks := splitMessage(text, maxLen)
+
+	// First chunk: edit the existing placeholder message.
 	_, err := tb.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
 		ChatID:    chatID,
 		MessageID: messageID,
-		Text:      text,
+		Text:      chunks[0],
 		ParseMode: models.ParseModeHTML,
 	})
 	if err != nil && !isNotModifiedErr(err) {
-		log.Printf("[telegram] edit html: %v", err)
+		if strings.Contains(err.Error(), "can't parse entities") {
+			tb.editText(ctx, chatID, messageID, stripHTMLTags(text))
+			return
+		}
+		log.Printf("[telegram] edit html (chunk 1): %v", err)
 	}
+
+	// Remaining chunks: send as new messages.
+	for i := 1; i < len(chunks); i++ {
+		_, err := tb.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      chunks[i],
+			ParseMode: models.ParseModeHTML,
+		})
+		if err != nil {
+			// Fall back to plain text for this chunk.
+			_, _ = tb.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   stripHTMLTags(chunks[i]),
+			})
+		}
+	}
+}
+
+// splitMessage splits a message into chunks of at most maxLen bytes.
+// It tries to split on newlines to keep the output clean.
+func splitMessage(text string, maxLen int) []string {
+	var chunks []string
+	for len(text) > 0 {
+		if len(text) <= maxLen {
+			chunks = append(chunks, text)
+			break
+		}
+		// Find the last newline within the limit.
+		cut := maxLen
+		if idx := strings.LastIndex(text[:cut], "\n"); idx > maxLen/2 {
+			cut = idx + 1 // include the newline in this chunk
+		}
+		chunks = append(chunks, text[:cut])
+		text = text[cut:]
+	}
+	return chunks
 }
 
 // isNotModifiedErr returns true for Telegram's "message is not modified" error.
@@ -388,4 +659,390 @@ func escapeHTML(s string) string {
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	return s
+}
+
+// stripHTMLTags removes HTML tags for plain-text fallback.
+var reHTMLTag = regexp.MustCompile(`<[^>]+>`)
+
+func stripHTMLTags(s string) string {
+	s = strings.ReplaceAll(s, "&amp;", "&")
+	s = strings.ReplaceAll(s, "&lt;", "<")
+	s = strings.ReplaceAll(s, "&gt;", ">")
+	return reHTMLTag.ReplaceAllString(s, "")
+}
+
+// --- Tool support ---
+
+// toolDefinitions converts the tool registry to OpenAI format.
+func (tb *Bot) toolDefinitions() []provider.ToolDef {
+	if tb.tools == nil {
+		return nil
+	}
+
+	toolList := tb.tools.List()
+	defs := make([]provider.ToolDef, len(toolList))
+
+	for i, tool := range toolList {
+		defs[i] = provider.ToolDef{
+			Type: "function",
+			Function: provider.FuncDef{
+				Name:        tool.Name(),
+				Description: tool.Description(),
+				Parameters:  tool.Parameters(),
+			},
+		}
+	}
+
+	return defs
+}
+
+// executeTools executes tool calls and returns results as provider.Messages
+// with proper tool_call_id fields for the OpenAI API format.
+// If a tool result contains [MCP_IMAGE:mime:base64] markers, the image is
+// sent directly to the Telegram chat and replaced with a text reference.
+func (tb *Bot) executeTools(ctx context.Context, toolCalls []provider.ToolCall) []provider.Message {
+	return tb.executeToolsForChat(ctx, 0, toolCalls)
+}
+
+// playwrightAutoScreenshotTools lists Playwright tool names that change
+// visible page state and should trigger an automatic screenshot.
+var playwrightAutoScreenshotTools = map[string]bool{
+	"browser_navigate":      true,
+	"browser_navigate_back":  true,
+	"browser_click":          true,
+	"browser_type":           true,
+	"browser_fill_form":      true,
+	"browser_select_option":  true,
+	"browser_drag":           true,
+	"browser_press_key":      true,
+	"browser_hover":          true,
+	"browser_handle_dialog":  true,
+	"browser_file_upload":    true,
+}
+
+// executeToolsForChat is the internal implementation that accepts a chatID
+// for sending screenshots. chatID=0 means no Telegram forwarding.
+func (tb *Bot) executeToolsForChat(ctx context.Context, chatID int64, toolCalls []provider.ToolCall) []provider.Message {
+	if tb.tools == nil {
+		return nil
+	}
+
+	results := make([]provider.Message, len(toolCalls))
+
+	for i, call := range toolCalls {
+		log.Printf("[telegram] executing tool: %s (id=%s, args=%s)",
+			call.Function.Name, call.ID, call.Function.Arguments)
+
+		result, err := tb.tools.Execute(ctx, call.Function.Name, call.Function.Arguments)
+
+		content := result
+		if err != nil {
+			content = fmt.Sprintf("Error: %v", err)
+			log.Printf("[telegram] tool error: %s: %v", call.Function.Name, err)
+		} else {
+			// Check for MCP image markers and send screenshots to Telegram.
+			if chatID != 0 && strings.Contains(content, "[MCP_IMAGE:") {
+				content = tb.handleMCPImages(ctx, chatID, content, call.Function.Name)
+			}
+
+			// Auto-screenshot after state-changing Playwright actions.
+			if chatID != 0 {
+				tb.maybeAutoScreenshot(ctx, chatID, call.Function.Name)
+			}
+
+			// Truncate log output for readability.
+			logContent := content
+			if len(logContent) > 200 {
+				logContent = logContent[:200] + "..."
+			}
+			log.Printf("[telegram] tool result: %s → %s", call.Function.Name, logContent)
+		}
+
+		results[i] = provider.Message{
+			Role:       "tool",
+			Content:    content,
+			ToolCallID: call.ID,
+		}
+	}
+
+	return results
+}
+
+// maybeAutoScreenshot takes a screenshot after state-changing Playwright
+// tool calls and sends it to the Telegram chat.
+func (tb *Bot) maybeAutoScreenshot(ctx context.Context, chatID int64, toolName string) {
+	// Only trigger for Playwright tools.
+	if !strings.HasPrefix(toolName, "mcp_playwright_") {
+		return
+	}
+
+	// Extract the bare tool name (strip "mcp_playwright_" prefix).
+	bareName := strings.TrimPrefix(toolName, "mcp_playwright_")
+	if !playwrightAutoScreenshotTools[bareName] {
+		return
+	}
+
+	// Get the Playwright MCP client from the registry.
+	screenshotTool := tb.tools.Get("mcp_playwright_browser_take_screenshot")
+	if screenshotTool == nil {
+		return
+	}
+	mcpTool, ok := screenshotTool.(*tools.MCPTool)
+	if !ok {
+		return
+	}
+
+	log.Printf("[telegram] auto-screenshot after %s", bareName)
+
+	// Call browser_take_screenshot via the MCP client.
+	result, err := mcpTool.Client().CallTool("browser_take_screenshot", map[string]interface{}{})
+	if err != nil {
+		log.Printf("[telegram] auto-screenshot failed: %v", err)
+		return
+	}
+
+	// Extract and send any images from the result.
+	text := mcp.ExtractText(result)
+	if strings.Contains(text, "[MCP_IMAGE:") {
+		tb.handleMCPImages(ctx, chatID, text, "auto-screenshot")
+	}
+}
+
+// handleMCPImages extracts [MCP_IMAGE:mime:base64] markers from tool output,
+// sends each image as a Telegram photo, and replaces markers with text.
+func (tb *Bot) handleMCPImages(ctx context.Context, chatID int64, content string, toolName string) string {
+	for {
+		start := strings.Index(content, "[MCP_IMAGE:")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(content[start:], "]")
+		if end == -1 {
+			break
+		}
+		end += start
+
+		// Parse [MCP_IMAGE:mime:base64data]
+		marker := content[start+len("[MCP_IMAGE:") : end]
+		parts := strings.SplitN(marker, ":", 2)
+		if len(parts) != 2 {
+			break
+		}
+
+		// Decode base64 and send as photo.
+		imgData, err := base64.StdEncoding.DecodeString(parts[1])
+		if err != nil {
+			log.Printf("[telegram] decode MCP image: %v", err)
+			content = content[:start] + "[Screenshot: decode error]" + content[end+1:]
+			continue
+		}
+
+		// Save to disk.
+		var savedPath string
+		if tb.dataDir != "" {
+			ext := ".png"
+			if strings.Contains(parts[0], "jpeg") || strings.Contains(parts[0], "jpg") {
+				ext = ".jpg"
+			}
+			fname := fmt.Sprintf("%s_screenshot%s", time.Now().Format("2006-01-02_150405"), ext)
+			savedPath = filepath.Join(tb.dataDir, "media", fname)
+			if err := os.WriteFile(savedPath, imgData, 0644); err != nil {
+				log.Printf("[telegram] save screenshot: %v", err)
+			}
+		}
+
+		// Send as Telegram photo.
+		_, err = tb.bot.SendPhoto(ctx, &bot.SendPhotoParams{
+			ChatID:  chatID,
+			Photo:   &models.InputFileUpload{Filename: "screenshot.png", Data: strings.NewReader(string(imgData))},
+			Caption: fmt.Sprintf("📸 Screenshot from %s", toolName),
+		})
+		if err != nil {
+			log.Printf("[telegram] send screenshot: %v", err)
+		}
+
+		// Replace marker with text reference.
+		replacement := "[Screenshot sent to chat]"
+		if savedPath != "" {
+			replacement = fmt.Sprintf("[Screenshot sent to chat, saved: %s]", savedPath)
+		}
+		content = content[:start] + replacement + content[end+1:]
+	}
+
+	return content
+}
+
+// handlePhotoMessage processes image messages with vision models.
+func (tb *Bot) handlePhotoMessage(ctx context.Context, b *bot.Bot, update *models.Update) {
+	chatID := update.Message.Chat.ID
+	chatIDStr := strconv.FormatInt(chatID, 10)
+	caption := update.Message.Caption
+	if caption == "" {
+		caption = "What's in this image?"
+	}
+
+	// Serialize LLM calls per chat.
+	mu := tb.getChatMutex(chatID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Get the highest quality photo.
+	photo := update.Message.Photo[len(update.Message.Photo)-1]
+
+	// Send placeholder.
+	placeholder, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   "🖼️ Analyzing image...",
+	})
+	if err != nil {
+		log.Printf("[telegram] send placeholder: %v", err)
+		return
+	}
+
+	// Download photo from Telegram.
+	file, err := b.GetFile(ctx, &bot.GetFileParams{FileID: photo.FileID})
+	if err != nil {
+		log.Printf("[telegram] get file: %v", err)
+		tb.editText(ctx, chatID, placeholder.ID, "❌ Failed to download image from Telegram.")
+		return
+	}
+
+	// Build download URL and fetch the image bytes.
+	fileURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", tb.botToken, file.FilePath)
+	imgResp, err := http.Get(fileURL)
+	if err != nil {
+		log.Printf("[telegram] download image: %v", err)
+		tb.editText(ctx, chatID, placeholder.ID, "❌ Failed to download image.")
+		return
+	}
+	defer imgResp.Body.Close()
+
+	imgData, err := io.ReadAll(imgResp.Body)
+	if err != nil {
+		log.Printf("[telegram] read image: %v", err)
+		tb.editText(ctx, chatID, placeholder.ID, "❌ Failed to read image data.")
+		return
+	}
+
+	// Determine MIME type from file extension.
+	mimeType := "image/jpeg"
+	if strings.HasSuffix(file.FilePath, ".png") {
+		mimeType = "image/png"
+	} else if strings.HasSuffix(file.FilePath, ".gif") {
+		mimeType = "image/gif"
+	} else if strings.HasSuffix(file.FilePath, ".webp") {
+		mimeType = "image/webp"
+	}
+
+	// Base64 encode.
+	b64 := base64.StdEncoding.EncodeToString(imgData)
+	dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, b64)
+
+	log.Printf("[telegram] image: %s, %d bytes, %s", file.FilePath, len(imgData), mimeType)
+
+	// Persist image to disk.
+	savedPath := ""
+	if tb.dataDir != "" {
+		ts := time.Now().Format("2006-01-02_150405")
+		ext := filepath.Ext(file.FilePath)
+		if ext == "" {
+			ext = ".jpg"
+		}
+		fname := fmt.Sprintf("%s_%s%s", ts, photo.FileID[:8], ext)
+		savedPath = filepath.Join(tb.dataDir, "media", fname)
+		if err := os.WriteFile(savedPath, imgData, 0644); err != nil {
+			log.Printf("[telegram] save image to disk: %v", err)
+			savedPath = "" // don't reference if save failed
+		} else {
+			log.Printf("[telegram] image saved: %s", savedPath)
+		}
+	}
+
+	// Save user caption to store for context (include local path if saved).
+	storeContent := "[Image] " + caption
+	if savedPath != "" {
+		storeContent = fmt.Sprintf("[Image: %s] %s", savedPath, caption)
+	}
+	if err := tb.store.AddMessage(chatIDStr, "user", storeContent); err != nil {
+		log.Printf("[telegram] save image msg: %v", err)
+	}
+
+	// Build messages with image content.
+	messages, err := tb.buildMessages(chatIDStr)
+	if err != nil {
+		log.Printf("[telegram] build messages: %v", err)
+		tb.editText(ctx, chatID, placeholder.ID, "❌ Error loading conversation history.")
+		return
+	}
+
+	// Replace the last user message (plain "[Image] caption") with multi-modal content.
+	if len(messages) > 0 {
+		messages[len(messages)-1] = provider.Message{
+			Role: "user",
+			ContentParts: []provider.ContentPart{
+				{Type: "text", Text: caption},
+				{Type: "image_url", ImageURL: &provider.ImageURL{URL: dataURL}},
+			},
+		}
+	}
+
+	// Use the same tool execution loop as regular messages.
+	// High limit (999) to support long Playwright browsing sessions.
+	maxIterations := 999
+	for i := 0; i < maxIterations; i++ {
+		req := provider.ChatRequest{
+			Model:    tb.model,
+			Messages: messages,
+		}
+		if tb.tools != nil {
+			req.Tools = tb.toolDefinitions()
+		}
+
+		log.Printf("[telegram] image: calling LLM (iteration %d, %d messages)", i+1, len(messages))
+		resp, err := tb.provider.Chat(ctx, req)
+		if err != nil {
+			log.Printf("[telegram] image chat error: %v", err)
+			tb.editText(ctx, chatID, placeholder.ID, fmt.Sprintf("❌ %v", err))
+			return
+		}
+
+		if len(resp.ToolCalls) > 0 {
+			toolNames := make([]string, len(resp.ToolCalls))
+			for j, tc := range resp.ToolCalls {
+				toolNames[j] = tc.Function.Name
+			}
+			tb.editText(ctx, chatID, placeholder.ID,
+				fmt.Sprintf("🔧 Using: %s ...", strings.Join(toolNames, ", ")))
+
+			messages = append(messages, provider.Message{
+				Role:      "assistant",
+				Content:   resp.Content,
+				ToolCalls: resp.ToolCalls,
+			})
+			toolResultMsgs := tb.executeToolsForChat(ctx, chatID, resp.ToolCalls)
+			messages = append(messages, toolResultMsgs...)
+			continue
+		}
+
+		if resp.Content == "" {
+			tb.editText(ctx, chatID, placeholder.ID, "⚠️ Empty response from AI.")
+			return
+		}
+
+		if err := tb.store.AddMessage(chatIDStr, "assistant", resp.Content); err != nil {
+			log.Printf("[telegram] save assistant msg: %v", err)
+		}
+
+		footer := ""
+		if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 {
+			footer = fmt.Sprintf("\n\n📊 %d→%d tokens | %s",
+				resp.Usage.InputTokens, resp.Usage.OutputTokens, tb.model)
+		}
+
+		formatted := FormatHTML(resp.Content + footer)
+		tb.editHTML(ctx, chatID, placeholder.ID, formatted)
+		return
+	}
+
+	tb.editText(ctx, chatID, placeholder.ID, "⚠️ Tool execution limit reached while analyzing image.")
 }

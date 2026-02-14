@@ -250,6 +250,79 @@ func findGitHubToken() (string, error) {
 	)
 }
 
+// --- Model Discovery ---
+
+const modelsURL = "https://api.githubcopilot.com/models"
+
+// CopilotModelEntry represents a single model from the /models API.
+type CopilotModelEntry struct {
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Vendor             string `json:"vendor"`
+	Version            string `json:"version"`
+	Preview            bool   `json:"preview"`
+	ModelPickerEnabled bool   `json:"model_picker_enabled"`
+	Billing            struct {
+		IsPremium bool `json:"is_premium"`
+	} `json:"billing"`
+	Capabilities struct {
+		Type   string `json:"type"` // "chat", "embeddings", etc.
+		Limits struct {
+			MaxContextWindowTokens int `json:"max_context_window_tokens"`
+			MaxOutputTokens        int `json:"max_output_tokens"`
+			MaxPromptTokens        int `json:"max_prompt_tokens"`
+		} `json:"limits"`
+	} `json:"capabilities"`
+	Policy struct {
+		State string `json:"state"` // "enabled", "disabled"
+	} `json:"policy"`
+}
+
+// FetchModels calls GET /models using the GitHub OAuth token (not the
+// Copilot bearer token). Returns only chat-capable, enabled, picker-visible models.
+func (tm *TokenManager) FetchModels() ([]CopilotModelEntry, error) {
+	req, err := http.NewRequest("GET", modelsURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build models request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tm.githubToken)
+	req.Header.Set("User-Agent", "aidaemon/0.1")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("x-github-api-version", "2025-05-01")
+
+	resp, err := tm.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch models: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read models response: %w", err)
+	}
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("models API error: HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Data []CopilotModelEntry `json:"data"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse models response: %w", err)
+	}
+
+	// Filter: chat-capable, enabled, picker-visible.
+	var filtered []CopilotModelEntry
+	for _, m := range result.Data {
+		if m.ModelPickerEnabled && m.Capabilities.Type == "chat" && m.Policy.State == "enabled" {
+			filtered = append(filtered, m)
+		}
+	}
+
+	return filtered, nil
+}
+
 // readOpenCodeToken reads the GitHub token from OpenCode's auth.json.
 // Format: {"github-copilot": {"access": "gho_xxx..."}}
 func readOpenCodeToken(path string) (string, error) {

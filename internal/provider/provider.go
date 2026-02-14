@@ -25,21 +25,65 @@ type Provider interface {
 
 // ChatRequest is the input to both Chat and Stream.
 type ChatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
+	Model    string         `json:"model"`
+	Messages []Message      `json:"messages"`
+	Tools    []ToolDef      `json:"tools,omitempty"`
+}
+
+// ToolDef is the OpenAI function calling format.
+type ToolDef struct {
+	Type     string   `json:"type"`
+	Function FuncDef  `json:"function"`
+}
+
+// FuncDef describes a callable function.
+type FuncDef struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Parameters  map[string]interface{} `json:"parameters"`
 }
 
 // Message represents a single message in a conversation.
 type Message struct {
-	Role    string `json:"role"`    // "system", "user", "assistant"
-	Content string `json:"content"`
+	Role         string        `json:"role"`                   // "system", "user", "assistant", "tool"
+	Content      string        `json:"content,omitempty"`
+	ContentParts []ContentPart `json:"content_parts,omitempty"` // Multi-modal (text + images)
+	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`    // For assistant messages
+	ToolCallID   string        `json:"tool_call_id,omitempty"`  // For tool messages
+}
+
+// ContentPart is a single part of a multi-modal message.
+type ContentPart struct {
+	Type     string    `json:"type"`                // "text" or "image_url"
+	Text     string    `json:"text,omitempty"`      // For type="text"
+	ImageURL *ImageURL `json:"image_url,omitempty"` // For type="image_url"
+}
+
+// ImageURL contains the image data or URL.
+type ImageURL struct {
+	URL string `json:"url"` // "data:image/jpeg;base64,..." or https URL
+}
+
+// ToolCall represents a tool invocation from the LLM.
+type ToolCall struct {
+	ID       string   `json:"id"`
+	Type     string   `json:"type"`
+	Function FuncCall `json:"function"`
+}
+
+// FuncCall contains the function name and arguments.
+type FuncCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON string
 }
 
 // ChatResponse is the complete response from a Chat call.
 type ChatResponse struct {
-	Content string `json:"content"`
-	Usage   Usage  `json:"usage"`
-	Model   string `json:"model"`
+	Content      string     `json:"content,omitempty"`
+	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
+	FinishReason string     `json:"finish_reason,omitempty"`
+	Usage        Usage      `json:"usage"`
+	Model        string     `json:"model"`
 }
 
 // StreamEvent is a single chunk from a streaming response.
@@ -61,8 +105,11 @@ type Usage struct {
 
 // ModelInfo describes a model available from a provider.
 type ModelInfo struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Premium  bool   `json:"premium"`  // true if quota-limited
-	Provider string `json:"provider"` // provider name
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Premium          bool   `json:"premium"`            // true if quota-limited
+	Provider         string `json:"provider"`           // provider name
+	Vendor           string `json:"vendor,omitempty"`   // e.g. "OpenAI", "Anthropic"
+	MaxContextTokens int    `json:"max_context_tokens"` // 0 = unknown
+	MaxOutputTokens  int    `json:"max_output_tokens"`  // 0 = unknown
 }
