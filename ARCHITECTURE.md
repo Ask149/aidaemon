@@ -1,467 +1,317 @@
-# AIDaemon Architecture
+# Architecture
 
-## Overview
+Technical deep-dive into AIDaemon's design, data flows, and implementation decisions.
 
-AIDaemon follows a layered architecture with clear separation of concerns:
+## System Overview
 
 ```
-┌─────────────────────────────────────────────┐
-│         Telegram Bot (Frontend)             │
-│  - Long polling                             │
-│  - Edit-message streaming                   │
-│  - Command handling                         │
-└─────────────────┬───────────────────────────┘
-                  │
-┌─────────────────▼───────────────────────────┐
-│           Core Daemon                       │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐ │
-│  │ Provider │  │  Store   │  │  Config  │ │
-│  │Interface │  │ (SQLite) │  │  Loader  │ │
-│  └──────────┘  └──────────┘  └──────────┘ │
-└─────────────────┬───────────────────────────┘
-                  │
-┌─────────────────▼───────────────────────────┐
-│        Copilot Provider                     │
-│  ┌──────────────┐  ┌──────────────┐        │
-│  │ TokenManager │  │ Model        │        │
-│  │ (Auth)       │  │ Discovery    │        │
-│  └──────────────┘  └──────────────┘        │
-└─────────────────┬───────────────────────────┘
-                  │
-┌─────────────────▼───────────────────────────┐
-│      Copilot API (OpenAI-compatible)        │
-│  - /chat/completions                        │
-│  - /models                                  │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                    Telegram Bot                          │
+│  Long polling · Edit-message streaming · Command routing │
+└──────────────────┬────────────────────────┬──────────────┘
+                   │                        │
+┌──────────────────▼──────────┐  ┌──────────▼──────────────┐
+│        HTTP API             │  │     SQLite Store         │
+│  /chat · /tool · /health    │  │  WAL mode · Auto-trim    │
+└──────────────────┬──────────┘  └─────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────────────┐
+│                   Core Daemon                           │
+│  ┌────────────┐  ┌──────────────┐  ┌────────────────┐  │
+│  │  Provider   │  │ Tool Registry │  │  Permissions   │  │
+│  │ (Copilot)   │  │ + Audit Log   │  │  Checker       │  │
+│  └──────┬─────┘  └───────┬──────┘  └────────────────┘  │
+│         │                │                              │
+└─────────┼────────────────┼──────────────────────────────┘
+          │                │
+          │         ┌──────┴──────────────────┐
+          │         │                         │
+   ┌──────▼──────┐  │  ┌──────────────────┐   │
+   │ Copilot API │  │  │  Built-in Tools  │   │
+   │ (13+ models)│  │  │  (5 tools)       │   │
+   └─────────────┘  │  └──────────────────┘   │
+                    │                         │
+              ┌─────▼─────────────────────────▼──┐
+              │          MCP Manager              │
+              │  ┌────────┐ ┌────────┐ ┌───────┐ │
+              │  │Playwrt │ │ Apple  │ │GCal   │ │
+              │  │Browser │ │ Apps   │ │Events │ │
+              │  └────────┘ └────────┘ └───────┘ │
+              │  ┌────────┐ ┌────────┐ ┌───────┐ │
+              │  │Memory  │ │Context7│ │Filesys│ │
+              │  └────────┘ └────────┘ └───────┘ │
+              └──────────────────────────────────┘
 ```
 
-## Component Details
+## Package Reference
 
-### 1. Authentication Layer (`internal/auth/`)
+### `internal/auth/`
 
-#### TokenManager (`copilot.go`)
+Manages the two-tier authentication flow:
 
-**Responsibilities:**
-- Manage GitHub OAuth token lifecycle
-- Exchange GitHub token for Copilot bearer token
-- Auto-refresh tokens before expiry
-- Thread-safe token access via `atomic.Value`
-- Deduplicate concurrent refresh via `singleflight.Group`
-
-**Token Flow:**
 ```
-GitHub OAuth token (long-lived, ~1 year)
-         ↓
-POST api.github.com/copilot_internal/v2/token
-         ↓
-Copilot bearer token (short-lived, 24h)
-         ↓
-Used for all /chat/completions calls
+GitHub OAuth token (long-lived, stored in auth.json)
+         ↓  POST api.github.com/copilot_internal/v2/token
+Copilot bearer token (short-lived, ~24h, cached in memory)
+         ↓  Used for all API calls
 ```
 
-**Token Sources (priority order):**
+**`copilot.go` — TokenManager**
+- Lock-free reads via `atomic.Value`
+- Deduplicates concurrent refreshes via `singleflight.Group`
+- Proactive refresh at 21h (before 24h expiry)
+- Auto-retry on 401 responses
+
+**`device_flow.go` — Device Flow**
+- GitHub OAuth device authorization (RFC 8628)
+- Saves token to `~/.config/aidaemon/auth.json`
+
+**Token source priority:**
 1. `GITHUB_TOKEN` environment variable
-2. `~/.config/aidaemon/auth.json` (saved by device flow)
-3. `~/.local/share/opencode/auth.json` (OpenCode integration)
-4. `~/.config/github-copilot/hosts.json` (VS Code extension)
-5. `~/.config/github-copilot/apps.json` (older installations)
+2. `~/.config/aidaemon/auth.json`
+3. `~/.local/share/opencode/auth.json`
+4. `~/.config/github-copilot/hosts.json`
+5. `~/.config/github-copilot/apps.json`
 
-#### Device Flow (`device_flow.go`)
+### `internal/provider/`
 
-**Purpose:** Authenticate users without browser automation.
-
-**Flow:**
-1. Request device code from GitHub
-2. Show URL + code to user
-3. Poll for completion
-4. Save token to `~/.config/aidaemon/auth.json`
-
-**Implementation:** Uses GitHub's OAuth device flow (RFC 8628).
-
-### 2. Provider Layer (`internal/provider/`)
-
-#### Provider Interface (`provider.go`)
+Abstraction layer for LLM backends.
 
 ```go
 type Provider interface {
-    Chat(ctx, req) (*ChatResponse, error)     // Blocking call
-    Stream(ctx, req) (<-chan StreamEvent, error) // Streaming
-    Models() []ModelInfo                      // Available models
-    Name() string                             // "copilot"
+    Chat(ctx, req) (*ChatResponse, error)           // Blocking
+    Stream(ctx, req) (<-chan StreamEvent, error)     // Streaming via SSE
+    Models() []ModelInfo                             // Available models
+    Name() string                                    // Provider identifier
 }
 ```
 
-**Design rationale:** Abstraction allows future multi-provider support (OpenRouter, Anthropic direct, etc.).
-
-#### Copilot Provider (`copilot/copilot.go`)
-
-**Key features:**
-- OpenAI-compatible API calls
+**`copilot/copilot.go`** implements this for GitHub Copilot's OpenAI-compatible API:
 - SSE (Server-Sent Events) streaming
-- 401 retry with token refresh
-- Dynamic model discovery via `/models` API
+- 401 retry with automatic token refresh
+- Dynamic model discovery via `/models` endpoint
 - 1-hour model cache with mutex-protected refresh
+- Required headers: `Editor-Version`, `Editor-Plugin-Version`, `Copilot-Integration-Id`
 
-**Required headers:**
+### `internal/tools/`
+
+Tool framework with OpenAI function calling format.
+
+**`tool.go`** — Core interface:
 ```go
-"Editor-Version": "vscode/1.105.1"
-"Editor-Plugin-Version": "copilot-chat/0.32.4"
-"Copilot-Integration-Id": "vscode-chat"
-"Openai-Intent": "conversation-panel"
+type Tool interface {
+    Name() string
+    Description() string
+    Parameters() map[string]interface{}  // JSON Schema
+    Execute(ctx, args map[string]interface{}) (string, error)
+}
 ```
 
-**Model Discovery:**
-- Calls `GET https://api.githubcopilot.com/models` with GitHub token
-- Filters: `model_picker_enabled && type=="chat" && policy.state=="enabled"`
-- Falls back to hardcoded list if API fails
-- Refreshes every 1 hour
+**`registry.go`** — Central tool management:
+- Register/lookup tools by name
+- Execute with permission checking and audit logging
+- Generate OpenAI-format tool definitions for LLM requests
+- `ExecuteAll` for batch tool call processing
 
-### 3. Storage Layer (`internal/store/`)
+**`mcp_tool.go`** — Adapts MCP server tools to the `Tool` interface.
 
-#### Store (`store.go`)
+**`builtin/`** — 5 built-in tools:
 
-**Database:** SQLite with WAL (Write-Ahead Logging) mode.
+| Tool | File | Safety |
+|------|------|--------|
+| `read_file` | `read_file.go` | Path whitelist (Documents, Projects, Desktop) |
+| `write_file` | `write_file.go` | Path whitelist, creates parent dirs |
+| `run_command` | `run_command.go` | Blocked commands list, 30s timeout |
+| `web_fetch` | `web_fetch.go` | 10s timeout, HTML→text extraction |
+| `web_search` | `web_search.go` | Brave API with DuckDuckGo fallback |
+
+### `internal/permissions/`
+
+Configurable per-tool access control.
+
+**Modes:**
+- `allow_all` (default) — no restrictions
+- `whitelist` — only explicitly allowed values
+- `deny` — everything allowed except denied values
+
+**Check methods:**
+- `CheckPath(tool, path)` — glob matching with `**` and `~` expansion
+- `CheckCommand(tool, cmd)` — extracts base command, matches against rules
+- `CheckDomain(tool, url)` — wildcard domain matching (`*.example.com`)
+
+### `internal/mcp/`
+
+MCP client implementing JSON-RPC 2.0 over stdio.
+
+**`transport.go`** — Low-level JSON-RPC 2.0:
+- Newline-delimited JSON over stdin/stdout
+- 10 MB scanner buffer for large tool responses
+- Request/response correlation by ID
+
+**`client.go`** — High-level MCP protocol:
+- `Initialize()` — protocol handshake
+- `ListTools()` — discover available tools
+- `CallTool(name, args)` — execute a tool
+
+**`server.go`** — Process lifecycle:
+- Launches MCP servers as subprocesses
+- Environment variable injection
+- Enable/disable per server
+
+**`types.go`** — MCP protocol types (ToolInfo, CallResult, etc.)
+
+### `internal/telegram/`
+
+Telegram bot with streaming support.
+
+**`bot.go`** (~1050 lines) — Core bot logic:
+- Long polling (works behind NAT)
+- Edit-message streaming with adaptive debounce
+- Tool execution loop (up to 999 iterations)
+- Image support (Telegram photos → base64 → vision models)
+- Context compaction (summarize old messages with cheap model)
+- Per-chat mutex prevents overlapping LLM calls
+- Auto-screenshot after Playwright navigation
+- Message splitting for responses exceeding 4096 chars
+
+**`markdown.go`** — LLM markdown → Telegram HTML conversion.
+
+**Adaptive debounce strategy:**
+| Message length | Edit interval |
+|---------------|---------------|
+| < 1000 chars | 1 second |
+| < 3000 chars | 2 seconds |
+| ≥ 3000 chars | 3 seconds |
+
+### `internal/httpapi/`
+
+REST API for programmatic access.
+
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `GET /health` | No | Health check + model info |
+| `POST /chat` | Bearer | Send message, get LLM response with tool loop |
+| `POST /tool` | Bearer | Execute a single tool directly |
+| `POST /reset` | Bearer | Clear a chat session |
+| `GET /sessions` | Bearer | List sessions |
+
+- 30s read timeout, 120s write timeout
+- Graceful shutdown on context cancellation
+
+### `internal/store/`
+
+SQLite conversation persistence.
 
 **Schema:**
 ```sql
 CREATE TABLE conversations (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id    TEXT    NOT NULL,
-    role       TEXT    NOT NULL,  -- "user" | "assistant" | "system"
+    role       TEXT    NOT NULL,
     content    TEXT    NOT NULL,
-    created_at INTEGER NOT NULL   -- Unix timestamp
+    created_at INTEGER NOT NULL
 );
 CREATE INDEX idx_conv_chat ON conversations(chat_id, created_at);
 ```
 
-**Operations:**
-- `GetHistory(chatID)` — Returns last N messages, oldest→newest
-- `AddMessage(chatID, role, content)` — Appends and auto-trims
-- `ClearChat(chatID)` — Deletes all messages for a chat
-- `MessageCount(chatID)` — Returns current message count
+- **WAL mode** — concurrent reads during writes
+- **Auto-trim** — deletes oldest messages beyond configured limit
+- **Compaction support** — `GetOldestN` + `ReplaceMessages` for summarization
 
-**Auto-trim logic:** After each insert, deletes messages beyond the configured limit (default 20).
+### `internal/config/`
 
-**Concurrency:** WAL mode allows concurrent reads during writes.
+JSON configuration with defaults.
 
-### 4. Telegram Layer (`internal/telegram/`)
+- Loads from `~/.config/aidaemon/config.json`
+- Creates data directories on startup
+- Loads system prompt from file or inline
+- Validates required fields (telegram_token, telegram_user_id)
 
-#### Bot (`bot.go`)
-
-**Library:** `github.com/go-telegram/bot` v1.18
-
-**Polling strategy:** Long polling (works behind NAT, no public URL needed).
-
-**Streaming pattern:**
-1. Send placeholder: "🤔 Thinking..."
-2. Stream LLM response via SSE
-3. Accumulate text in buffer
-4. Edit message periodically (adaptive debounce: 1s → 2s → 3s as message grows)
-5. Final edit includes usage stats
-
-**Adaptive debounce:**
-```go
-< 1000 chars: 1 second between edits
-< 3000 chars: 2 seconds
-≥ 3000 chars: 3 seconds
-```
-
-**Rationale:** Telegram rate-limits edits to ~1/sec. Larger messages need less frequent updates.
-
-**Concurrency control:** Per-chat mutex (`sync.Map`) prevents overlapping LLM calls for the same chat.
-
-**Security:** Only configured `telegram_user_id` can interact. Other users silently dropped.
-
-### 5. Configuration Layer (`internal/config/`)
-
-#### Config (`config.go`)
-
-**Path:** `~/.config/aidaemon/config.json`
-
-**Schema:**
-```go
-type Config struct {
-    TelegramToken           string
-    TelegramUserID          int64
-    ChatModel               string  // default: "claude-opus-4.6"
-    MaxConversationMessages int     // default: 20
-    SystemPrompt            string
-    Port                    int     // default: 8420 (not wired yet)
-    DBPath                  string  // default: ~/.config/aidaemon/aidaemon.db
-    LogLevel                string  // default: "info"
-}
-```
-
-**Validation:**
-- `telegram_token` and `telegram_user_id` are required
-- `max_conversation_messages` minimum 2
-- Falls back to defaults for optional fields
-
-## Data Flow
+## Data Flows
 
 ### Chat Request (Streaming)
 
 ```
-1. User sends Telegram message
-   ↓
-2. Bot validates user ID
-   ↓
-3. Store.AddMessage(chatID, "user", text)
-   ↓
-4. Store.GetHistory(chatID) → last 20 messages
-   ↓
-5. Build messages: [system] + history
-   ↓
-6. Provider.Stream(ctx, req)
-   ↓
-7. TokenManager.GetToken() (refresh if needed)
-   ↓
-8. POST api.githubcopilot.com/chat/completions (stream=true)
-   ↓
-9. Read SSE stream, send deltas to channel
-   ↓
-10. Bot accumulates + edits Telegram message periodically
-    ↓
-11. On stream complete, Store.AddMessage(chatID, "assistant", fullText)
-    ↓
-12. Final edit with usage stats
+ 1. User sends Telegram message
+ 2. Bot validates user ID → reject if unauthorized
+ 3. Store.AddMessage(chatID, "user", text)
+ 4. Store.GetHistory(chatID) → last N messages
+ 5. Build messages: [system_prompt] + history + tool_definitions
+ 6. Provider.Stream(ctx, request)
+ 7. TokenManager.GetToken() → refresh if expired
+ 8. POST api.githubcopilot.com/chat/completions (stream=true)
+ 9. Read SSE chunks → send deltas to channel
+10. Bot accumulates text + edits Telegram message (adaptive debounce)
+11. If tool_calls in response:
+    a. Execute each tool via Registry.Execute()
+    b. Append tool results to messages
+    c. Go to step 6 (loop until finish_reason=stop)
+12. Store.AddMessage(chatID, "assistant", fullText)
+13. Final edit with usage stats
 ```
 
-### Model Discovery
+### Tool Execution
 
 ```
-1. Provider.Models() called (startup or hourly)
-   ↓
-2. Check cache: fresh? → return cached
-   ↓
-3. TokenManager.FetchModels()
-   ↓
-4. GET api.githubcopilot.com/models (with GitHub token)
-   ↓
-5. Parse response, filter chat-capable models
-   ↓
-6. Map to ModelInfo, cache for 1 hour
-   ↓
-7. Return to caller
+1. Registry.Execute(ctx, toolName, argsJSON)
+2. Parse JSON arguments
+3. Permission check: CheckPath / CheckCommand / CheckDomain
+4. Audit log: CALL entry
+5. Tool.Execute(ctx, args)
+6. Audit log: OK / ERROR entry with duration
+7. Return result string
 ```
 
-## Concurrency Design
+### Context Compaction
 
-### Token Manager
-
-- **Read path:** Lock-free via `atomic.Value.Load()`
-- **Refresh path:** `singleflight.Group` deduplicates concurrent refreshes
-- **Result:** High read throughput, single refresh per expiry
-
-### Telegram Bot
-
-- **Per-chat mutex:** `sync.Map[int64]*sync.Mutex`
-- **Prevents:** Race conditions from user sending multiple messages quickly
-- **Trade-off:** Serializes requests per chat, but allows parallel chats
-
-### SQLite Store
-
-- **WAL mode:** Multiple readers + single writer concurrency
-- **Trade-off:** Slight complexity increase, but critical for multi-chat support
-
-## Error Handling
-
-### Token Refresh (401 Retry)
-
-```go
-resp := sendRequest(ctx, token, body)
-if resp.StatusCode == 401 {
-    resp.Body.Close()
-    token, err := tokenManager.ForceRefresh()  // Invalidate cache
-    if err != nil { return err }
-    resp = sendRequest(ctx, token, body)  // Retry once
-}
+```
+1. Message count exceeds limit (default 20)
+2. Get oldest 10 messages
+3. Summarize with cheap model (gpt-4o-mini)
+4. Replace 10 messages with single summary message
+5. Conversation continues with compressed context
 ```
 
-**Rationale:** Token may expire mid-request. Single retry is sufficient.
+## Concurrency Model
 
-### Stream Errors
+| Component | Strategy | Rationale |
+|-----------|----------|-----------|
+| Token refresh | `singleflight.Group` | Deduplicates concurrent refreshes |
+| Token reads | `atomic.Value` | Lock-free hot path |
+| Per-chat handling | `sync.Map[chatID]*sync.Mutex` | Serializes per chat, parallel across chats |
+| SQLite | WAL mode | Concurrent readers + single writer |
+| Tool registry | `sync.RWMutex` | Read-heavy access pattern |
+| Audit writes | Best-effort, non-blocking | Never delays tool execution |
 
-Telegram bot sends errors inline in the message:
-```
-❌ Stream error: context deadline exceeded
-```
+## Performance
 
-User sees the error immediately rather than silent failure.
-
-### Tool Call Errors (Future)
-
-Will follow same pattern: inline error message in Telegram.
-
-## Security Considerations
-
-### Current
-
-1. **Single-user authentication:** Only configured Telegram user ID can access
-2. **Local token storage:** Tokens never leave the machine
-3. **HTTPS only:** All API calls over TLS
-4. **No logging of tokens:** Logs redact sensitive data
-
-### Future (with tool use)
-
-1. **File access permissions:** Whitelist paths, deny sensitive dirs
-2. **Command allowlist:** Start with read-only commands
-3. **Tool audit log:** Every tool call logged with timestamp, args, result
-4. **Rate limiting:** Prevent runaway tool calls
-
-## Performance Characteristics
-
-### Latency
-
-- **Token refresh:** ~300ms (cached for 24h, proactive refresh at 21h)
-- **Model discovery:** ~500ms (cached for 1h)
-- **Chat (streaming):** First token in 1-2s, full response 5-30s depending on length
-- **SQLite reads:** <5ms (indexed queries)
-- **SQLite writes:** <10ms (WAL mode)
-
-### Throughput
-
-- **Concurrent chats:** No limit (per-chat mutex prevents chat-level races)
-- **Messages/second:** Limited by Telegram's edit rate (~1/sec) and LLM speed
-- **Token refresh:** Deduplicated via singleflight
-
-### Resource Usage
-
-- **Memory:** ~50MB resident (mostly Go runtime + SQLite)
-- **Disk:** DB size ~100KB per 1000 messages
-- **CPU:** <1% when idle, 5-10% during streaming (parsing SSE)
+| Metric | Value |
+|--------|-------|
+| Cold start | < 500ms (excluding MCP server launch) |
+| Token refresh | ~300ms (cached 24h) |
+| Model discovery | ~500ms (cached 1h) |
+| First token latency | 1–2s |
+| SQLite read | < 5ms |
+| SQLite write | < 10ms |
+| Memory (idle) | ~50 MB |
+| Memory (with MCP) | ~150 MB |
 
 ## Design Decisions
 
-### Why Telegram?
+| Decision | Why |
+|----------|-----|
+| **Telegram** | Accessible from any device, built-in push notifications, no custom UI needed |
+| **SQLite + WAL** | Zero-config, crash-safe, embedded, fast for single-user workloads |
+| **Go** | Single binary, fast startup, goroutines for streaming, cross-compilation |
+| **Copilot only** | $10/month for 13+ premium models, no API key juggling |
+| **MCP over stdio** | Standard protocol, reuse existing server ecosystem, process isolation |
+| **Edit-message streaming** | Telegram doesn't support true streaming; edit-in-place is the best UX |
 
-- **Accessible anywhere:** Phone, desktop, web
-- **No custom UI needed:** Telegram handles all presentation
-- **Push notifications:** Built-in
-- **Works behind NAT:** No port forwarding needed
-- **Multi-device:** Same conversation on all devices
+## Dependencies
 
-### Why SQLite?
-
-- **Zero-config:** Embedded, no server to manage
-- **Reliable:** ACID transactions, crash-safe (WAL)
-- **Fast:** Local filesystem access
-- **Portable:** Single file, easy to backup
-
-### Why Go?
-
-- **Single binary:** No Node.js dependencies
-- **Fast startup:** <100ms cold start
-- **Concurrency:** Goroutines for streaming, mutex for safety
-- **Cross-compile:** Easy macOS + Linux support
-- **Type safety:** Catch errors at compile time
-
-### Why Copilot Only?
-
-- **Cost:** $10/mo vs $20/mo Anthropic + $20/mo OpenAI
-- **Model variety:** 13+ models including latest GPT-5, Claude, Gemini
-- **Already paid for:** If you use VS Code, you probably have Copilot
-- **Simple auth:** Single OAuth flow, no API key juggling
-
-## Future Architecture (with Tools)
-
-```
-┌─────────────────────────────────────────────┐
-│         Telegram Bot (Frontend)             │
-└─────────────────┬───────────────────────────┘
-                  │
-┌─────────────────▼───────────────────────────┐
-│           Core Daemon                       │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐ │
-│  │ Provider │  │  Tool    │  │  MCP     │ │
-│  │Interface │→ │ Registry │→ │ Client   │ │
-│  └──────────┘  └──────────┘  └──────────┘ │
-└─────────────────┬───────────────────────────┘
-                  │
-    ┌─────────────┼─────────────┐
-    │             │             │
-┌───▼────┐  ┌────▼─────┐  ┌───▼────────┐
-│ Built  │  │ Browser  │  │ MCP Servers│
-│ Tools  │  │ (Rod)    │  │ (spawned)  │
-└────────┘  └──────────┘  └────────────┘
-    │             │             │
-┌───▼─────────────▼─────────────▼─────┐
-│  Local Machine (Files, Shell, Web)  │
-└─────────────────────────────────────┘
-```
-
-**Key additions:**
-- **Tool Registry:** Manages tool lifecycle and dispatch
-- **MCP Client:** Communicates with external MCP servers via stdio
-- **Browser Automation:** Rod (Puppeteer for Go)
-
-## Monitoring & Observability
-
-### Current Logging
-
-```
-[daemon] config loaded (model=claude-opus-4.6, conv_limit=20)
-[daemon] copilot auth OK (expires in 24h0m0s)
-[copilot] discovered 13 models from API
-[daemon] provider: copilot (13 models)
-[telegram] bot starting (user_id=XXXXXXXXXX, model=claude-sonnet-4.5)
-```
-
-### Future Metrics (Post-Tool Implementation)
-
-- Tool execution time histogram
-- Tool success/failure rates
-- LLM token usage per chat
-- Conversation length distribution
-- Model usage breakdown
-
-## Testing Strategy
-
-### Current
-
-- Manual testing via Telegram
-- Model probing script (`cmd/probe-models/`)
-
-### Needed (Phase 1+)
-
-- Unit tests for tool registry
-- Integration tests for tool execution
-- Mock LLM responses for deterministic tests
-- Load testing (concurrent chat simulation)
-
-## Deployment
-
-### Current (Development)
-
-```bash
-/opt/homebrew/bin/go run ./cmd/aidaemon/
-```
-
-### Recommended (Production)
-
-```bash
-# Build binary
-/opt/homebrew/bin/go build -o aidaemon ./cmd/aidaemon/
-
-# Run as launchd service (macOS)
-cp aidaemon /usr/local/bin/
-cp com.aidaemon.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.aidaemon.plist
-```
-
-### Future: Docker
-
-```dockerfile
-FROM golang:1.25-alpine
-WORKDIR /app
-COPY . .
-RUN go build -o aidaemon ./cmd/aidaemon/
-CMD ["./aidaemon"]
-```
-
-## References
-
-- **OpenCode architecture:** https://github.com/sst/opencode
-- **Copilot API:** Reverse-engineered from OpenCode + Zed editor
-- **MCP protocol:** https://modelcontextprotocol.io/
-- **Telegram Bot API:** https://core.telegram.org/bots/api
+| Package | Purpose |
+|---------|---------|
+| `github.com/go-telegram/bot` | Telegram Bot API client |
+| `modernc.org/sqlite` | Pure-Go SQLite (no CGO) |
+| `golang.org/x/net` | HTML tokenizer for web_fetch |
+| `golang.org/x/sync` | `singleflight` for token dedup |

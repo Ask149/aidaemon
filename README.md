@@ -1,225 +1,288 @@
-# AIDaemon — Personal AI Agent via Telegram
+# AIDaemon
 
-**A 24/7 AI assistant accessible from anywhere via Telegram, powered by your GitHub Copilot subscription.**
+A personal AI agent daemon that runs on your machine and gives you access to premium LLM models through Telegram — powered by your GitHub Copilot subscription.
 
-## What It Is
-
-AIDaemon is a personal AI agent daemon that runs on your Mac and gives you access to premium LLM models (GPT-5, Claude Opus 4.6, Gemini 3 Pro) through Telegram — all using your **$10/month GitHub Copilot subscription**. No separate API keys needed.
-
-**Message your bot from anywhere** (phone, work computer, tablet) and get:
-- Streaming AI responses with live typing indicators
-- Access to 13+ premium models
-- Persistent conversations across sessions
-- Tool use capabilities (file access, shell commands, web search, MCP integration)
-
-## Quick Start
-
-### 1. Prerequisites
-
-- macOS (ARM64 or Intel)
-- Go 1.25+ (`/opt/homebrew/bin/go`)
-- GitHub Copilot subscription ($10/mo)
-- Telegram account
-
-### 2. Authentication
-
-```bash
-cd aidaemon
-go run ./cmd/aidaemon/ --login
-```
-
-Follow the device code flow to authenticate with GitHub.
-
-### 3. Configuration
-
-Create `~/.config/aidaemon/config.json`:
-
-```json
-{
-  "telegram_token": "YOUR_BOT_TOKEN_FROM_BOTFATHER",
-  "telegram_user_id": YOUR_TELEGRAM_USER_ID,
-  "chat_model": "claude-opus-4.6",
-  "system_prompt": "You are a helpful personal assistant. Be concise and direct.",
-  "max_conversation_messages": 20
-}
-```
-
-**Get your bot token:**
-1. Message [@BotFather](https://t.me/botfather) on Telegram
-2. Send `/newbot` and follow prompts
-3. Copy the token
-
-**Get your user ID:**
-1. Message [@userinfobot](https://t.me/userinfobot) on Telegram
-2. Copy your numeric ID
-
-### 4. Run
-
-```bash
-/opt/homebrew/bin/go run ./cmd/aidaemon/
-```
-
-The daemon will start and listen for Telegram messages.
-
-## Commands
-
-| Command | Action |
-|---------|--------|
-| *any text* | Chat with the AI (streamed response) |
-| `/model` | List all available models |
-| `/model <id>` | Switch to a different model |
-| `/status` | Show current model and context size |
-| `/reset` | Clear conversation history |
-| `/help` | Show help message |
-
-## Available Models (as of Feb 2026)
-
-**Base tier (unlimited):**
-- gpt-4o, gpt-4.1, gpt-4o-mini
-
-**Premium tier (~300 req/month on Copilot Individual):**
-- GPT-5, GPT-5-mini, GPT-5.1, GPT-5.2
-- Claude Opus 4.6, Claude Opus 4.6 Fast, Claude Opus 4.5
-- Claude Sonnet 4.5, Claude Sonnet 4
-- Claude Haiku 4.5
-- Gemini 2.5 Pro, Gemini 3 Pro Preview, Gemini 3 Flash Preview
-
-Models are auto-discovered from the Copilot API and refreshed hourly.
-
-## Architecture
-
-```
-GitHub OAuth → Copilot Token → OpenAI-compatible API
-                              ↓
-                        13+ LLM models
-                              ↓
-                        Telegram Bot
-                              ↓
-                    SQLite conversation store
-```
-
-### Project Structure
-
-```
-cmd/
-  aidaemon/           # Main daemon entry point
-  test-copilot/       # Auth testing tool
-  probe-models/       # Model discovery testing
-internal/
-  auth/               # GitHub OAuth + Copilot token management
-  config/             # Configuration loading
-  provider/           # LLM provider abstraction
-    copilot/          # Copilot-specific implementation
-  store/              # SQLite conversation persistence
-  telegram/           # Telegram bot implementation
-```
+Chat with GPT-5, Claude Opus 4.6, Gemini 3 Pro, and 10+ other models from your phone, tablet, or any device with Telegram. Execute tools, browse the web, control your Mac, and integrate with 70+ MCP-powered capabilities — all for $10/month.
 
 ## Features
 
-✅ **Currently working:**
-- Chat with 13+ premium models via Telegram
-- Streaming responses with live typing indicator
-- Dynamic model switching mid-conversation
-- Auto-discovery of available models
-- Persistent conversations (SQLite)
-- Multi-chat support (each Telegram chat is separate)
-- Secure (only your Telegram user ID can access)
+- **13+ premium models** — GPT-5, Claude Opus 4.6, Gemini 3 Pro, and more via GitHub Copilot API
+- **Streaming responses** — live typing indicators with adaptive debounce
+- **Tool execution** — read/write files, run shell commands, search the web
+- **MCP integration** — 6 servers, 70+ tools (Playwright, Apple apps, Google Calendar, memory, filesystem)
+- **Browser automation** — navigate, click, type, screenshot web pages via Playwright
+- **Image analysis** — send photos to Telegram, get AI-powered descriptions
+- **Persistent conversations** — SQLite-backed history with smart context compaction
+- **HTTP API** — REST endpoints for programmatic access alongside the Telegram interface
+- **Permission system** — configurable per-tool access control with path/command/domain rules
+- **Audit logging** — structured log of every tool execution with timing data
+- **Single-user security** — only your Telegram user ID can interact with the bot
 
-🚧 **In development (Phase 1):**
-- Tool/function calling framework
-- Local file access (read/write)
-- Shell command execution
-- Web search and fetching
+## Quick Start
 
-📋 **Planned (Phase 2+):**
-- MCP server integration (Google Calendar, Tasks, Apple Notes)
-- Browser automation
-- Image analysis
-- Markdown formatting in Telegram
-- Smart context compaction
-- Rich system prompt with personal context
-- HTTP API
+### Prerequisites
 
-## Development
+- **macOS** (ARM64 or Intel) or Linux
+- **Go 1.25+**
+- **GitHub Copilot** subscription ($10/month)
+- **Telegram** account
 
-**Build:**
+### Install
+
 ```bash
-/opt/homebrew/bin/go build ./...
+git clone https://github.com/Ask149/aidaemon.git
+cd aidaemon
+go build -o aidaemon ./cmd/aidaemon/
 ```
 
-**Run tests:**
+### Authenticate
+
 ```bash
-/opt/homebrew/bin/go test ./...
+./aidaemon --login
 ```
 
-**Vet:**
-```bash
-/opt/homebrew/bin/go vet ./...
-```
+Follow the GitHub device code flow — open the URL, enter the code, authorize.
 
-## Configuration Options
+### Configure
 
-Full config schema:
+Create `~/.config/aidaemon/config.json`:
 
-```json
+```jsonc
 {
-  "telegram_token": "string (required)",
-  "telegram_user_id": 123456789 (required),
-  "chat_model": "string (default: claude-opus-4.6)",
-  "system_prompt": "string (default: generic assistant prompt)",
-  "max_conversation_messages": 20,
-  "port": 8420,
-  "db_path": "~/.config/aidaemon/aidaemon.db",
-  "log_level": "info"
+  "telegram_token": "YOUR_BOT_TOKEN",       // from @BotFather on Telegram
+  "telegram_user_id": 123456789,            // from @userinfobot on Telegram
+  "chat_model": "claude-sonnet-4.5",        // default model
+  "max_conversation_messages": 20,          // context window size
+  "system_prompt": "You are a helpful personal assistant."
 }
 ```
 
-## Troubleshooting
+<details>
+<summary><strong>Getting your Telegram credentials</strong></summary>
 
-**Authentication failed:**
+**Bot token:** Message [@BotFather](https://t.me/botfather) → `/newbot` → follow prompts → copy the token.
+
+**User ID:** Message [@userinfobot](https://t.me/userinfobot) → copy your numeric ID.
+
+</details>
+
+### Run
+
 ```bash
-# Re-run device flow
-/opt/homebrew/bin/go run ./cmd/aidaemon/ --login
+./aidaemon
 ```
 
-**Daemon not starting:**
-- Check logs for errors
-- Verify config.json is valid JSON
-- Ensure Telegram token and user ID are correct
+The daemon starts, connects to Telegram, and waits for your messages.
 
-**No models available:**
-- Check GitHub Copilot subscription is active
-- Run `/opt/homebrew/bin/go run ./cmd/test-copilot/` to test auth
+## Usage
 
-**Bot not responding:**
-- Verify your user ID matches config
-- Check daemon logs
-- Restart daemon
+### Telegram Commands
+
+| Command | Description |
+|---------|-------------|
+| _any text_ | Chat with the AI (streamed response) |
+| `/model` | List available models |
+| `/model <id>` | Switch model (e.g., `/model gpt-5`) |
+| `/status` | Show current model and context info |
+| `/reset` | Clear conversation history |
+| `/help` | Show help |
+
+### HTTP API
+
+When `api_token` is set in config, a REST API is available on port 8420:
+
+```bash
+# Chat
+curl -X POST http://localhost:8420/chat \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Hello!", "session_id": "my-session"}'
+
+# Execute a tool directly
+curl -X POST http://localhost:8420/tool \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "read_file", "args": {"path": "/tmp/test.txt"}}'
+
+# Health check (no auth required)
+curl http://localhost:8420/health
+```
+
+## Built-in Tools
+
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read file contents from allowed directories |
+| `write_file` | Create or overwrite files |
+| `run_command` | Execute shell commands (destructive commands blocked) |
+| `web_fetch` | Fetch and extract text from any URL |
+| `web_search` | Search the web via Brave Search API or DuckDuckGo fallback |
+
+## MCP Servers
+
+AIDaemon connects to [MCP](https://modelcontextprotocol.io/) servers at startup, dynamically registering their tools alongside the built-in ones.
+
+| Server | Description |
+|--------|-------------|
+| [Playwright](https://github.com/playwright-community/mcp) | Browser automation — navigate, click, type, screenshot |
+| [Apple](https://github.com/nicholasyager/apple-mcp) | Calendar, Contacts, Mail, Notes, Reminders, Maps, Messages |
+| [Google Calendar](https://github.com/cocal-ai/google-calendar-mcp) | Google Calendar event management |
+| [Memory](https://github.com/modelcontextprotocol/servers) | Persistent key-value memory across conversations |
+| [Context7](https://github.com/upstash/context7-mcp) | Look up API documentation for any library |
+| [Filesystem](https://github.com/modelcontextprotocol/servers) | Read, write, search, move files in allowed directories |
+
+Configure in `config.json`:
+
+```jsonc
+{
+  "mcp_servers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest", "--browser", "chrome"]
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    }
+  }
+}
+```
+
+## Configuration
+
+<details>
+<summary><strong>Full config.json reference</strong></summary>
+
+```jsonc
+{
+  // Required
+  "telegram_token": "string",          // Telegram bot token from BotFather
+  "telegram_user_id": 123456789,       // Your Telegram numeric user ID
+
+  // Model
+  "chat_model": "claude-sonnet-4.5",   // Default LLM model
+  "max_conversation_messages": 20,     // Messages before context compaction
+
+  // System prompt
+  "system_prompt": "string",           // Prepended to every conversation
+
+  // Storage
+  "db_path": "string",                 // SQLite path (default: ~/.config/aidaemon/aidaemon.db)
+  "data_dir": "string",               // Media/logs dir (default: ~/.config/aidaemon/data)
+
+  // Web search
+  "brave_api_key": "string",          // Brave Search API key (optional, falls back to DuckDuckGo)
+
+  // HTTP API
+  "port": 8420,                        // API port (0 to disable)
+  "api_token": "string",              // Bearer token for API auth
+
+  // Permissions (optional)
+  "tool_permissions": {
+    "run_command": {
+      "mode": "deny",                 // "allow_all" | "whitelist" | "deny"
+      "denied_commands": ["rm", "sudo", "shutdown"]
+    },
+    "read_file": {
+      "mode": "whitelist",
+      "allowed_paths": ["~/Documents/**", "~/Projects/**"]
+    }
+  },
+
+  // MCP servers
+  "mcp_servers": {
+    "server-name": {
+      "command": "npx",
+      "args": ["-y", "package-name"],
+      "env": {"KEY": "value"},
+      "enabled": true
+    }
+  },
+
+  "log_level": "info"                 // "debug" | "info" | "warn" | "error"
+}
+```
+
+</details>
+
+## Available Models
+
+Models are auto-discovered from the Copilot API and refreshed hourly.
+
+**Base tier** (unlimited):
+`gpt-4o` · `gpt-4.1` · `gpt-4o-mini`
+
+**Premium tier** (~300 req/month on Copilot Individual):
+`gpt-5` · `gpt-5-mini` · `gpt-5.1` · `gpt-5.2` · `claude-opus-4.6` · `claude-sonnet-4.5` · `claude-sonnet-4` · `claude-haiku-4.5` · `gemini-2.5-pro` · `gemini-3-pro-preview` · `gemini-3-flash-preview`
+
+## Architecture
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed technical documentation.
+
+```
+You (Telegram) ──→ Telegram Bot ──→ Copilot API (13+ models)
+                        │                    │
+                        │              Tool calls
+                        │                    │
+                   SQLite Store    ┌─────────┴─────────┐
+                                   │                   │
+                             Built-in Tools      MCP Servers
+                             (5 tools)           (70+ tools)
+                                   │                   │
+                             Files, Shell,      Browser, Calendar,
+                             Web Search         Notes, Memory, ...
+```
+
+## Project Structure
+
+```
+cmd/
+  aidaemon/              Main daemon entry point
+  test-copilot/          Auth testing utility
+  probe-models/          Model discovery testing
+  test-tools/            Tool execution testing
+
+internal/
+  auth/                  GitHub OAuth + Copilot token management
+  config/                Configuration loading and validation
+  httpapi/               REST API server
+  mcp/                   MCP client (JSON-RPC 2.0 over stdio)
+  permissions/           Per-tool permission enforcement
+  provider/
+    copilot/             GitHub Copilot API implementation
+  store/                 SQLite conversation persistence (WAL mode)
+  telegram/              Telegram bot (streaming, commands, images)
+  tools/
+    builtin/             Built-in tools (5 tools)
+    registry.go          Tool registry + execution engine
+    mcp_tool.go          MCP tool adapter
+```
+
+## Development
+
+```bash
+go build ./...           # Build all packages
+go vet ./...             # Static analysis
+go test ./...            # Run tests
+go run -race ./cmd/aidaemon/  # Run with race detector
+go install ./cmd/aidaemon/    # Install to $GOBIN
+```
 
 ## Security
 
-- Only the configured Telegram user ID can interact with the bot
-- Messages from other users are silently dropped
-- All conversations stored locally in SQLite
-- No data leaves your machine except LLM API calls
+- **Single-user only** — messages from unauthorized Telegram users are silently dropped
+- **Local execution** — all tools run on your machine; nothing leaves except LLM API calls
+- **Permission system** — per-tool whitelist/deny rules for paths, commands, and domains
+- **Audit trail** — every tool execution logged with timestamps, duration, and status
+- **Token safety** — pre-commit hook blocks accidental credential commits
+- **No telemetry** — zero data collection, zero phone-home
 
-## Comparison to OpenCode
+See [SECURITY.md](SECURITY.md) for the security policy.
 
-AIDaemon is inspired by [OpenCode](https://github.com/sst/opencode) but optimized for Telegram access:
+## Contributing
 
-| Feature | OpenCode | AIDaemon |
-|---------|----------|----------|
-| Interface | TUI + Desktop + Web | Telegram |
-| Tool use | 17+ built-in tools | In development |
-| Providers | 22+ | Copilot only (13+ models) |
-| MCP support | Full | Planned |
-| Use case | AI coding assistant | Personal assistant |
-| Cost | Various API keys | $10/mo Copilot only |
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-MIT
-
-## Author
-
-Built for personal use. Inspired by OpenCode's architecture.
+[MIT](LICENSE)
