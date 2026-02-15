@@ -8,6 +8,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,7 +148,9 @@ func Load() (*Config, error) {
 
 	// Ensure workspace directory exists.
 	wsDir := cfg.ResolvedWorkspaceDir()
-	os.MkdirAll(wsDir, 0700)
+	if err := os.MkdirAll(wsDir, 0700); err != nil {
+		log.Printf("[config] failed to create workspace dir %s: %v", wsDir, err)
+	}
 
 	// Load system prompt from file if it exists.
 	cfg.SystemPrompt = loadSystemPrompt(cfg.SystemPrompt)

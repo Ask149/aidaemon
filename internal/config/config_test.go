@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -26,7 +27,7 @@ func TestResolveWorkspaceDir_Default(t *testing.T) {
 	wsDir := cfg.ResolvedWorkspaceDir()
 	// Should end with .config/aidaemon/workspace
 	want := filepath.Join(".config", "aidaemon", "workspace")
-	if len(wsDir) < len(want) || wsDir[len(wsDir)-len(want):] != want {
+	if !strings.HasSuffix(wsDir, want) {
 		t.Errorf("expected default workspace path ending with %q, got %q", want, wsDir)
 	}
 }
