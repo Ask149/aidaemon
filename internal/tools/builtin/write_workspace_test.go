@@ -14,66 +14,65 @@ func TestWriteWorkspaceTool_Name(t *testing.T) {
 	}
 }
 
-func TestWriteWorkspaceTool_WritesMemory(t *testing.T) {
-	dir := t.TempDir()
-	tool := &WriteWorkspaceTool{WorkspaceDir: dir}
-
-	content := "Remember: user prefers dark mode."
-	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"file":    "MEMORY.md",
-		"content": content,
-	})
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+func TestWriteWorkspaceTool_WritesAllowed(t *testing.T) {
+	tests := []struct {
+		name    string
+		file    string
+		content string
+	}{
+		{"MEMORY.md", "MEMORY.md", "Remember: user prefers dark mode."},
+		{"TOOLS.md", "TOOLS.md", "MCP server runs on port 8080."},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tool := &WriteWorkspaceTool{WorkspaceDir: dir}
 
-	// Verify success message includes byte count.
-	if result == "" {
-		t.Fatal("Execute() returned empty result")
-	}
+			result, err := tool.Execute(context.Background(), map[string]interface{}{
+				"file":    tt.file,
+				"content": tt.content,
+			})
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if result == "" {
+				t.Fatal("Execute() returned empty result")
+			}
 
-	// Verify file was written to disk.
-	data, err := os.ReadFile(filepath.Join(dir, "MEMORY.md"))
-	if err != nil {
-		t.Fatalf("reading MEMORY.md from disk: %v", err)
-	}
-	if string(data) != content {
-		t.Errorf("file content = %q, want %q", string(data), content)
-	}
-}
-
-func TestWriteWorkspaceTool_RejectsSOUL(t *testing.T) {
-	dir := t.TempDir()
-	tool := &WriteWorkspaceTool{WorkspaceDir: dir}
-
-	_, err := tool.Execute(context.Background(), map[string]interface{}{
-		"file":    "SOUL.md",
-		"content": "hacked soul",
-	})
-	if err == nil {
-		t.Fatal("Execute() should reject write to SOUL.md")
-	}
-
-	// Verify no file was created.
-	if _, statErr := os.Stat(filepath.Join(dir, "SOUL.md")); statErr == nil {
-		t.Error("SOUL.md should not have been created")
+			data, err := os.ReadFile(filepath.Join(dir, tt.file))
+			if err != nil {
+				t.Fatalf("reading %s from disk: %v", tt.file, err)
+			}
+			if string(data) != tt.content {
+				t.Errorf("file content = %q, want %q", string(data), tt.content)
+			}
+		})
 	}
 }
 
-func TestWriteWorkspaceTool_RejectsPathTraversal(t *testing.T) {
-	dir := t.TempDir()
-	tool := &WriteWorkspaceTool{WorkspaceDir: dir}
-
-	_, err := tool.Execute(context.Background(), map[string]interface{}{
-		"file":    "../etc/passwd",
-		"content": "root::0:0:::/bin/sh",
-	})
-	if err == nil {
-		t.Fatal("Execute() should reject path traversal attempt")
+func TestWriteWorkspaceTool_RejectsInvalidFiles(t *testing.T) {
+	tests := []struct {
+		name string
+		file string
+	}{
+		{"non-writable SOUL.md", "SOUL.md"},
+		{"non-writable USER.md", "USER.md"},
+		{"path traversal", "../etc/passwd"},
+		{"traversal with allowed name", "../../MEMORY.md"},
+		{"wrong case", "memory.md"},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tool := &WriteWorkspaceTool{WorkspaceDir: dir}
 
-	// Verify no file was created outside workspace.
-	if _, statErr := os.Stat(filepath.Join(dir, "..", "etc", "passwd")); statErr == nil {
-		t.Error("path traversal file should not have been created")
+			_, err := tool.Execute(context.Background(), map[string]interface{}{
+				"file":    tt.file,
+				"content": "should not be written",
+			})
+			if err == nil {
+				t.Fatalf("Execute() should reject file %q", tt.file)
+			}
+		})
 	}
 }
