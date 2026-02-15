@@ -242,6 +242,17 @@ func (m *MemoryStore) Close() error {
 	return nil
 }
 
+func (m *MemoryStore) ListSessions() ([]store.SessionInfo, error) {
+	var sessions []store.SessionInfo
+	for chatID, msgs := range m.messages {
+		sessions = append(sessions, store.SessionInfo{
+			ChatID:       chatID,
+			MessageCount: len(msgs),
+		})
+	}
+	return sessions, nil
+}
+
 // TempDir creates a temporary directory for testing file operations.
 // Returns the path. Cleaned up automatically when the test finishes.
 func TempDir(t *testing.T) string {

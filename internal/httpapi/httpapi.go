@@ -207,19 +207,13 @@ func (a *API) handleChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-type sessionInfo struct {
-	ID       string `json:"id"`
-	Messages int    `json:"messages"`
-}
-
 func (a *API) handleSessions(w http.ResponseWriter, _ *http.Request) {
-	// List sessions by querying the store for distinct chat IDs.
-	// For now, return a simple response. The store doesn't have a ListSessions method,
-	// so we return a placeholder.
-	jsonResp(w, http.StatusOK, map[string]string{
-		"status": "ok",
-		"note":   "session listing not yet implemented — use the Telegram interface for full session management",
-	})
+	sessions, err := a.cfg.Store.ListSessions()
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "list sessions: "+err.Error())
+		return
+	}
+	jsonResp(w, http.StatusOK, sessions)
 }
 
 type resetRequest struct {

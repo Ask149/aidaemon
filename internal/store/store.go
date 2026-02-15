@@ -15,6 +15,13 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// SessionInfo describes a chat session.
+type SessionInfo struct {
+	ChatID       string    `json:"chat_id"`
+	MessageCount int       `json:"message_count"`
+	LastActivity time.Time `json:"last_activity"`
+}
+
 // Message is a single conversation message.
 type Message struct {
 	Role      string    `json:"role"`
@@ -54,6 +61,9 @@ type Conversation interface {
 
 	// Limit returns the configured max messages per chat.
 	Limit() int
+
+	// ListSessions returns info about all chat sessions, ordered by most recent activity.
+	ListSessions() ([]SessionInfo, error)
 
 	// Close closes the underlying storage.
 	Close() error
@@ -204,6 +214,32 @@ func (s *SQLiteStore) MessageCount(chatID string) (int, error) {
 // Limit returns the configured max messages per chat.
 func (s *SQLiteStore) Limit() int {
 	return s.limit
+}
+
+// ListSessions returns info about all chat sessions, ordered by most recent activity.
+func (s *SQLiteStore) ListSessions() ([]SessionInfo, error) {
+	rows, err := s.db.Query(`
+		SELECT chat_id, COUNT(*) as msg_count, MAX(created_at) as last_active
+		FROM conversations
+		GROUP BY chat_id
+		ORDER BY last_active DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var sessions []SessionInfo
+	for rows.Next() {
+		var si SessionInfo
+		var ts int64
+		if err := rows.Scan(&si.ChatID, &si.MessageCount, &ts); err != nil {
+			return nil, fmt.Errorf("scan session: %w", err)
+		}
+		si.LastActivity = time.Unix(ts, 0)
+		sessions = append(sessions, si)
+	}
+	return sessions, nil
 }
 
 // GetOldestN returns the oldest N messages for a chat (for compaction).

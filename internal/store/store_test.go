@@ -230,6 +230,45 @@ func TestReplaceMessagesEmpty(t *testing.T) {
 	}
 }
 
+func TestListSessions(t *testing.T) {
+	st := newTestStore(t, 20)
+
+	// Empty store.
+	sessions, err := st.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("expected 0 sessions, got %d", len(sessions))
+	}
+
+	// Add messages to different sessions.
+	st.AddMessage("chat-1", "user", "hello")
+	st.AddMessage("chat-1", "assistant", "hi")
+	st.AddMessage("chat-2", "user", "yo")
+
+	sessions, err = st.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Errorf("expected 2 sessions, got %d", len(sessions))
+	}
+
+	// Check session info.
+	sessionMap := make(map[string]SessionInfo)
+	for _, s := range sessions {
+		sessionMap[s.ChatID] = s
+	}
+
+	if s, ok := sessionMap["chat-1"]; !ok || s.MessageCount != 2 {
+		t.Errorf("chat-1: expected 2 messages, got %+v", sessionMap["chat-1"])
+	}
+	if s, ok := sessionMap["chat-2"]; !ok || s.MessageCount != 1 {
+		t.Errorf("chat-2: expected 1 message, got %+v", sessionMap["chat-2"])
+	}
+}
+
 // TestConversationInterface verifies that *SQLiteStore implements Conversation.
 func TestConversationInterface(t *testing.T) {
 	var _ Conversation = newTestStore(t, 10)
