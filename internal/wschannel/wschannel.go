@@ -13,8 +13,12 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/Ask149/aidaemon/internal/channel"
 	"nhooyr.io/websocket"
 )
+
+// Compile-time interface check.
+var _ channel.Channel = (*Channel)(nil)
 
 // OnMessageFunc handles an incoming message and returns a reply.
 type OnMessageFunc func(ctx context.Context, sessionID, text string) (string, error)
@@ -42,11 +46,15 @@ func New(cfg Config) *Channel {
 // Name returns the channel name.
 func (c *Channel) Name() string { return "websocket" }
 
-// Handler returns an http.Handler for WebSocket upgrades.
-func (c *Channel) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", c.handleWS)
-	return mux
+// Start is a no-op for WebSocket; the HTTP server drives connections.
+func (c *Channel) Start(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// Handler returns an http.HandlerFunc for WebSocket upgrades.
+func (c *Channel) Handler() http.HandlerFunc {
+	return c.handleWS
 }
 
 // Send delivers a message to a connected WebSocket client.
@@ -116,8 +124,12 @@ func (c *Channel) handleWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if incoming.SessionID != "" {
+		if incoming.SessionID != "" && incoming.SessionID != sessionID {
+			c.mu.Lock()
+			delete(c.conns, sessionID)
 			sessionID = incoming.SessionID
+			c.conns[sessionID] = conn
+			c.mu.Unlock()
 		}
 
 		reply, err := c.cfg.OnMessage(ctx, sessionID, incoming.Message)

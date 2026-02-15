@@ -24,16 +24,19 @@ import (
 	"github.com/Ask149/aidaemon/internal/auth"
 	"github.com/Ask149/aidaemon/internal/channel"
 	"github.com/Ask149/aidaemon/internal/config"
+	"github.com/Ask149/aidaemon/internal/engine"
 	"github.com/Ask149/aidaemon/internal/heartbeat"
 	"github.com/Ask149/aidaemon/internal/httpapi"
 	"github.com/Ask149/aidaemon/internal/mcp"
 	"github.com/Ask149/aidaemon/internal/permissions"
+	"github.com/Ask149/aidaemon/internal/provider"
 	"github.com/Ask149/aidaemon/internal/provider/copilot"
 	"github.com/Ask149/aidaemon/internal/store"
 	"github.com/Ask149/aidaemon/internal/telegram"
 	"github.com/Ask149/aidaemon/internal/tools"
 	"github.com/Ask149/aidaemon/internal/tools/builtin"
 	"github.com/Ask149/aidaemon/internal/workspace"
+	"github.com/Ask149/aidaemon/internal/wschannel"
 )
 
 func main() {
@@ -174,7 +177,47 @@ func run() error {
 	// 6. Start services.
 	log.Println("[daemon] starting...")
 
-	// 6a. HTTP API (optional — requires api_token and port > 0).
+	// 6a. WebSocket channel — delegates to engine.
+	wsEngine := &engine.Engine{Provider: prov, Registry: registry}
+	wsCh := wschannel.New(wschannel.Config{
+		OnMessage: func(ctx context.Context, sessionID, text string) (string, error) {
+			if err := st.AddMessage(sessionID, "user", text); err != nil {
+				return "", err
+			}
+
+			history, err := st.GetHistory(sessionID)
+			if err != nil {
+				return "", err
+			}
+
+			ws := workspace.Load(wsDir)
+			messages := make([]provider.Message, 0, len(history)+1)
+			messages = append(messages, provider.Message{Role: "system", Content: ws.SystemPrompt()})
+			for _, m := range history {
+				messages = append(messages, provider.Message{Role: m.Role, Content: m.Content})
+			}
+
+			result, err := wsEngine.Run(ctx, messages, engine.RunOptions{Model: cfg.ChatModel, MaxIterations: 25})
+			if err != nil {
+				// Return partial result if available (e.g., max iterations reached).
+				if result != nil && result.Content != "" {
+					if saveErr := st.AddMessage(sessionID, "assistant", result.Content); saveErr != nil {
+						log.Printf("[wschannel] store error: %v", saveErr)
+					}
+					return result.Content, nil
+				}
+				return "", err
+			}
+
+			if err := st.AddMessage(sessionID, "assistant", result.Content); err != nil {
+				log.Printf("[wschannel] store error: %v", err)
+			}
+			return result.Content, nil
+		},
+	})
+	log.Println("[daemon] websocket channel ready")
+
+	// 6b. HTTP API (optional — requires api_token and port > 0).
 	if cfg.APIToken != "" && cfg.Port > 0 {
 		api := httpapi.New(httpapi.Config{
 			Port:         cfg.Port,
@@ -185,6 +228,7 @@ func run() error {
 			Model:        cfg.ChatModel,
 			SysPrompt:    initialPrompt,
 			WorkspaceDir: wsDir,
+			WSHandler:    wsCh.Handler(),
 		})
 		go func() {
 			if err := api.Start(ctx); err != nil {
@@ -195,7 +239,7 @@ func run() error {
 		log.Printf("[daemon] HTTP API disabled (set api_token in config to enable)")
 	}
 
-	// 6b. Telegram bot (optional).
+	// 6c. Telegram bot (optional).
 	var tbot *telegram.Bot
 	if cfg.TelegramEnabled() {
 		st.MigrateChatIDs("telegram")

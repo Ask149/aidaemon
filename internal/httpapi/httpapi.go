@@ -37,6 +37,7 @@ type Config struct {
 	Model        string            `json:"model"`
 	SysPrompt    string            `json:"sys_prompt"`
 	WorkspaceDir string            `json:"workspace_dir"`
+	WSHandler    http.Handler      `json:"-"` // Optional WebSocket upgrade handler.
 }
 
 // API is the HTTP server.
@@ -62,6 +63,11 @@ func New(cfg Config) *API {
 	mux.HandleFunc("GET /sessions", api.requireAuth(api.handleSessions))
 	mux.HandleFunc("POST /reset", api.requireAuth(api.handleReset))
 	mux.HandleFunc("POST /tool", api.requireAuth(api.handleTool))
+
+	// Mount WebSocket handler (unauthenticated — uses per-connection session IDs).
+	if cfg.WSHandler != nil {
+		mux.Handle("/ws", cfg.WSHandler)
+	}
 
 	api.server = &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
