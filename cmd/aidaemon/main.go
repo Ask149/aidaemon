@@ -168,27 +168,10 @@ func run() error {
 	log.Printf("[daemon] workspace: %s (soul=%d, user=%d, memory=%d, tools=%d chars)",
 		wsDir, len(ws.Soul), len(ws.User), len(ws.Memory), len(ws.Tools))
 
-	// 6. Telegram bot.
-	tbot, err := telegram.New(telegram.Config{
-		Token:        cfg.TelegramToken,
-		UserID:       cfg.TelegramUserID,
-		Provider:     prov,
-		Store:        st,
-		Model:        cfg.ChatModel,
-		SystemPrompt: initialPrompt,
-		ConvLimit:    cfg.MaxConversationMessages,
-		ToolRegistry: registry,
-		DataDir:      cfg.DataDir,
-		WorkspaceDir: wsDir,
-	})
-	if err != nil {
-		return fmt.Errorf("telegram: %w", err)
-	}
+	// 6. Start services.
+	log.Println("[daemon] starting...")
 
-	// 7. Start — bot blocks until ctx is cancelled.
-	log.Println("[daemon] starting — send a Telegram message to chat")
-
-	// 7a. HTTP API (optional — requires api_token and port > 0).
+	// 6a. HTTP API (optional — requires api_token and port > 0).
 	if cfg.APIToken != "" && cfg.Port > 0 {
 		api := httpapi.New(httpapi.Config{
 			Port:         cfg.Port,
@@ -209,8 +192,31 @@ func run() error {
 		log.Printf("[daemon] HTTP API disabled (set api_token in config to enable)")
 	}
 
-	// Bot.Start blocks until ctx is cancelled.
-	tbot.Start(ctx)
+	// 6b. Telegram bot (optional).
+	if cfg.TelegramEnabled() {
+		tbot, err := telegram.New(telegram.Config{
+			Token:        cfg.TelegramToken,
+			UserID:       cfg.TelegramUserID,
+			Provider:     prov,
+			Store:        st,
+			Model:        cfg.ChatModel,
+			SystemPrompt: initialPrompt,
+			ConvLimit:    cfg.MaxConversationMessages,
+			ToolRegistry: registry,
+			DataDir:      cfg.DataDir,
+			WorkspaceDir: wsDir,
+		})
+		if err != nil {
+			return fmt.Errorf("telegram: %w", err)
+		}
+		go tbot.Start(ctx)
+		log.Println("[daemon] telegram bot started")
+	} else {
+		log.Println("[daemon] telegram disabled (no token configured)")
+	}
+
+	// Block until shutdown signal.
+	<-ctx.Done()
 
 	log.Println("[daemon] shutting down...")
 

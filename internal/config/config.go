@@ -163,12 +163,13 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) validate() error {
-	if c.TelegramToken == "" {
-		return fmt.Errorf("telegram_token is required")
+	// Telegram: require both or neither.
+	hasTgToken := c.TelegramToken != ""
+	hasTgUser := c.TelegramUserID != 0
+	if hasTgToken != hasTgUser {
+		return fmt.Errorf("telegram_token and telegram_user_id must both be set or both be empty")
 	}
-	if c.TelegramUserID == 0 {
-		return fmt.Errorf("telegram_user_id is required (get it from @userinfobot on Telegram)")
-	}
+
 	if c.ChatModel == "" {
 		return fmt.Errorf("chat_model is required")
 	}
@@ -176,6 +177,11 @@ func (c *Config) validate() error {
 		c.MaxConversationMessages = 2
 	}
 	return nil
+}
+
+// TelegramEnabled returns true if Telegram is configured.
+func (c *Config) TelegramEnabled() bool {
+	return c.TelegramToken != "" && c.TelegramUserID != 0
 }
 
 // ConversationLimit returns MaxConversationMessages as a usable value.
