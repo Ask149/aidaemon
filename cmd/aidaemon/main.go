@@ -153,7 +153,15 @@ func run() error {
 	defer st.Close()
 	log.Printf("[daemon] store: %s", cfg.DBPath)
 
-	// 5b. Load workspace (re-read per message, but load once here for initial prompt).
+	// 5b. Migrate system_prompt.md → workspace SOUL.md (one-time, idempotent).
+	workspace.MigrateSystemPrompt(filepath.Dir(cfg.DBPath), cfg.ResolvedWorkspaceDir())
+
+	// 5c. Ensure default workspace files exist.
+	if err := workspace.EnsureDefaults(cfg.ResolvedWorkspaceDir()); err != nil {
+		log.Printf("[daemon] warning: workspace defaults: %v", err)
+	}
+
+	// 5d. Load workspace (re-read per message, but load once here for initial prompt).
 	wsDir := cfg.ResolvedWorkspaceDir()
 	ws := workspace.Load(wsDir)
 	initialPrompt := ws.SystemPrompt()
