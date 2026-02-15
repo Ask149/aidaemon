@@ -24,17 +24,19 @@ import (
 	"github.com/Ask149/aidaemon/internal/provider"
 	"github.com/Ask149/aidaemon/internal/store"
 	"github.com/Ask149/aidaemon/internal/tools"
+	"github.com/Ask149/aidaemon/internal/workspace"
 )
 
 // Config holds the HTTP API configuration.
 type Config struct {
-	Port      int              `json:"port"`
-	Token     string           `json:"token"`
-	Store     *store.Store     `json:"-"`
-	Registry  *tools.Registry  `json:"-"`
-	Provider  provider.Provider `json:"-"`
-	Model     string           `json:"model"`
-	SysPrompt string           `json:"sys_prompt"`
+	Port         int               `json:"port"`
+	Token        string            `json:"token"`
+	Store        *store.Store      `json:"-"`
+	Registry     *tools.Registry   `json:"-"`
+	Provider     provider.Provider `json:"-"`
+	Model        string            `json:"model"`
+	SysPrompt    string            `json:"sys_prompt"`
+	WorkspaceDir string            `json:"workspace_dir"`
 }
 
 // API is the HTTP server.
@@ -160,8 +162,14 @@ func (a *API) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	messages := make([]provider.Message, 0, len(history)+1)
-	if a.cfg.SysPrompt != "" {
-		messages = append(messages, provider.Message{Role: "system", Content: a.cfg.SysPrompt})
+	// Re-read workspace for fresh system prompt.
+	sysPrompt := a.cfg.SysPrompt
+	if a.cfg.WorkspaceDir != "" {
+		ws := workspace.Load(a.cfg.WorkspaceDir)
+		sysPrompt = ws.SystemPrompt()
+	}
+	if sysPrompt != "" {
+		messages = append(messages, provider.Message{Role: "system", Content: sysPrompt})
 	}
 	for _, m := range history {
 		messages = append(messages, provider.Message{Role: m.Role, Content: m.Content})

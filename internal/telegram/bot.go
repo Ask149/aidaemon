@@ -28,21 +28,23 @@ import (
 	"github.com/Ask149/aidaemon/internal/provider"
 	"github.com/Ask149/aidaemon/internal/store"
 	"github.com/Ask149/aidaemon/internal/tools"
+	"github.com/Ask149/aidaemon/internal/workspace"
 )
 
 // Bot wraps the Telegram bot with LLM integration.
 type Bot struct {
-	bot       *bot.Bot
-	provider  provider.Provider
-	store     *store.Store
-	tools     *tools.Registry
-	engine    *engine.Engine
-	userID    int64
-	model     string
-	sysPrompt string
-	convLimit int
-	botToken  string // needed for file download URLs
-	dataDir   string // root for media/logs/files persistence
+	bot          *bot.Bot
+	provider     provider.Provider
+	store        *store.Store
+	tools        *tools.Registry
+	engine       *engine.Engine
+	userID       int64
+	model        string
+	sysPrompt    string
+	convLimit    int
+	botToken     string // needed for file download URLs
+	dataDir      string // root for media/logs/files persistence
+	workspaceDir string // workspace directory for dynamic system prompts
 
 	// Guards per-chat to prevent concurrent LLM calls for the same chat.
 	chatMu sync.Map // map[int64]*sync.Mutex
@@ -50,29 +52,31 @@ type Bot struct {
 
 // Config for creating a new Bot.
 type Config struct {
-	Token         string
-	UserID        int64
-	Provider      provider.Provider
-	Store         *store.Store
-	Model         string
-	SystemPrompt  string
-	ConvLimit     int
-	ToolRegistry  *tools.Registry
-	DataDir       string
+	Token        string
+	UserID       int64
+	Provider     provider.Provider
+	Store        *store.Store
+	Model        string
+	SystemPrompt string
+	ConvLimit    int
+	ToolRegistry *tools.Registry
+	DataDir      string
+	WorkspaceDir string
 }
 
 // New creates a new Telegram bot. Call Start() to begin polling.
 func New(cfg Config) (*Bot, error) {
 	tb := &Bot{
-		provider:  cfg.Provider,
-		store:     cfg.Store,
-		tools:     cfg.ToolRegistry,
-		userID:    cfg.UserID,
-		model:     cfg.Model,
-		sysPrompt: cfg.SystemPrompt,
-		convLimit: cfg.ConvLimit,
-		botToken:  cfg.Token,
-		dataDir:   cfg.DataDir,
+		provider:     cfg.Provider,
+		store:        cfg.Store,
+		tools:        cfg.ToolRegistry,
+		userID:       cfg.UserID,
+		model:        cfg.Model,
+		sysPrompt:    cfg.SystemPrompt,
+		convLimit:    cfg.ConvLimit,
+		botToken:     cfg.Token,
+		dataDir:      cfg.DataDir,
+		workspaceDir: cfg.WorkspaceDir,
 	}
 
 	// Initialize the chat engine for tool-call orchestration.
@@ -253,9 +257,10 @@ sendResult:
 // buildStatsFooter creates a compact stats line appended to every response.
 // Always shows at least timing and model name.
 // Example outputs:
-//   📊 1.2K→234 tok | ⏱ 3.4s | claude-sonnet-4.5
-//   📊 45K→1.2K tok (68K total) | ⏱ 12.5s | 🔧 3 tools (read_file ×2, run_command) | 2 LLM calls | gpt-4o
-//   📊 ~2.1K→89 tok | ⏱ 0.8s | claude-sonnet-4.5
+//
+//	📊 1.2K→234 tok | ⏱ 3.4s | claude-sonnet-4.5
+//	📊 45K→1.2K tok (68K total) | ⏱ 12.5s | 🔧 3 tools (read_file ×2, run_command) | 2 LLM calls | gpt-4o
+//	📊 ~2.1K→89 tok | ⏱ 0.8s | claude-sonnet-4.5
 func (tb *Bot) buildStatsFooter(result *engine.Result) string {
 	if result == nil {
 		return ""
@@ -457,7 +462,12 @@ func (tb *Bot) handleContext(ctx context.Context, b *bot.Bot, update *models.Upd
 	tokenLimitVal := modelTokenLimitStr(tb.model)
 
 	// System prompt size.
-	sysPromptTokens := len(tb.sysPrompt) / 3
+	sysPrompt := tb.sysPrompt
+	if tb.workspaceDir != "" {
+		ws := workspace.Load(tb.workspaceDir)
+		sysPrompt = ws.SystemPrompt()
+	}
+	sysPromptTokens := len(sysPrompt) / 3
 
 	var sb strings.Builder
 	sb.WriteString("📐 <b>Context Window Details</b>\n\n")
@@ -692,8 +702,14 @@ func (tb *Bot) buildMessages(chatIDStr string) ([]provider.Message, error) {
 
 	// System prompt + history.
 	msgs := make([]provider.Message, 0, len(history)+1)
-	if tb.sysPrompt != "" {
-		msgs = append(msgs, provider.Message{Role: "system", Content: tb.sysPrompt})
+	// Re-read workspace files for fresh system prompt.
+	sysPrompt := tb.sysPrompt
+	if tb.workspaceDir != "" {
+		ws := workspace.Load(tb.workspaceDir)
+		sysPrompt = ws.SystemPrompt()
+	}
+	if sysPrompt != "" {
+		msgs = append(msgs, provider.Message{Role: "system", Content: sysPrompt})
 	}
 	for _, m := range history {
 		msgs = append(msgs, provider.Message{Role: m.Role, Content: m.Content})
@@ -804,10 +820,10 @@ func (tb *Bot) streamToTelegram(
 	stream <-chan provider.StreamEvent,
 ) (string, *provider.Usage) {
 	var (
-		buf       strings.Builder
-		lastEdit  time.Time
-		usage     *provider.Usage
-		lastLen   int
+		buf      strings.Builder
+		lastEdit time.Time
+		usage    *provider.Usage
+		lastLen  int
 	)
 
 	for event := range stream {
@@ -1047,16 +1063,16 @@ func (e *telegramToolExecutor) ExecuteToolCalls(ctx context.Context, calls []pro
 // visible page state and should trigger an automatic screenshot.
 var playwrightAutoScreenshotTools = map[string]bool{
 	"browser_navigate":      true,
-	"browser_navigate_back":  true,
-	"browser_click":          true,
-	"browser_type":           true,
-	"browser_fill_form":      true,
-	"browser_select_option":  true,
-	"browser_drag":           true,
-	"browser_press_key":      true,
-	"browser_hover":          true,
-	"browser_handle_dialog":  true,
-	"browser_file_upload":    true,
+	"browser_navigate_back": true,
+	"browser_click":         true,
+	"browser_type":          true,
+	"browser_fill_form":     true,
+	"browser_select_option": true,
+	"browser_drag":          true,
+	"browser_press_key":     true,
+	"browser_hover":         true,
+	"browser_handle_dialog": true,
+	"browser_file_upload":   true,
 }
 
 // executeToolsForChat is the internal implementation that accepts a chatID

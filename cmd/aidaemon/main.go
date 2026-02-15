@@ -30,6 +30,7 @@ import (
 	"github.com/Ask149/aidaemon/internal/telegram"
 	"github.com/Ask149/aidaemon/internal/tools"
 	"github.com/Ask149/aidaemon/internal/tools/builtin"
+	"github.com/Ask149/aidaemon/internal/workspace"
 )
 
 func main() {
@@ -152,6 +153,13 @@ func run() error {
 	defer st.Close()
 	log.Printf("[daemon] store: %s", cfg.DBPath)
 
+	// 5b. Load workspace (re-read per message, but load once here for initial prompt).
+	wsDir := cfg.ResolvedWorkspaceDir()
+	ws := workspace.Load(wsDir)
+	initialPrompt := ws.SystemPrompt()
+	log.Printf("[daemon] workspace: %s (soul=%d, user=%d, memory=%d, tools=%d chars)",
+		wsDir, len(ws.Soul), len(ws.User), len(ws.Memory), len(ws.Tools))
+
 	// 6. Telegram bot.
 	tbot, err := telegram.New(telegram.Config{
 		Token:        cfg.TelegramToken,
@@ -159,10 +167,11 @@ func run() error {
 		Provider:     prov,
 		Store:        st,
 		Model:        cfg.ChatModel,
-		SystemPrompt: cfg.SystemPrompt,
+		SystemPrompt: initialPrompt,
 		ConvLimit:    cfg.MaxConversationMessages,
 		ToolRegistry: registry,
 		DataDir:      cfg.DataDir,
+		WorkspaceDir: wsDir,
 	})
 	if err != nil {
 		return fmt.Errorf("telegram: %w", err)
@@ -174,13 +183,14 @@ func run() error {
 	// 7a. HTTP API (optional — requires api_token and port > 0).
 	if cfg.APIToken != "" && cfg.Port > 0 {
 		api := httpapi.New(httpapi.Config{
-			Port:     cfg.Port,
-			Token:    cfg.APIToken,
-			Store:    st,
-			Registry: registry,
-			Provider: prov,
-			Model:    cfg.ChatModel,
-			SysPrompt: cfg.SystemPrompt,
+			Port:         cfg.Port,
+			Token:        cfg.APIToken,
+			Store:        st,
+			Registry:     registry,
+			Provider:     prov,
+			Model:        cfg.ChatModel,
+			SysPrompt:    initialPrompt,
+			WorkspaceDir: wsDir,
 		})
 		go func() {
 			if err := api.Start(ctx); err != nil {
@@ -266,6 +276,10 @@ func setupTools(cfg *config.Config) *tools.Registry {
 
 	registry.Register(&builtin.WebSearchTool{
 		BraveAPIKey: cfg.BraveAPIKey,
+	})
+
+	registry.Register(&builtin.WriteWorkspaceTool{
+		WorkspaceDir: cfg.ResolvedWorkspaceDir(),
 	})
 
 	return registry
