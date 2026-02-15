@@ -39,6 +39,17 @@ func TestHeartbeat_FiresOnInterval(t *testing.T) {
 	}
 }
 
+func TestHeartbeat_DisabledWithZeroInterval(t *testing.T) {
+	hb := New(Config{
+		Interval: 0,
+		SendFn: func(context.Context, string) error {
+			t.Fatal("should not fire")
+			return nil
+		},
+	})
+	hb.Run(context.Background()) // should return immediately
+}
+
 func TestHeartbeat_StopsOnCancel(t *testing.T) {
 	var mu sync.Mutex
 	count := 0

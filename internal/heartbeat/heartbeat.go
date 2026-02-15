@@ -32,7 +32,12 @@ type Runner struct {
 }
 
 // New creates a heartbeat runner.
+// If SendFn is nil, the runner is disabled (Interval set to 0).
 func New(cfg Config) *Runner {
+	if cfg.SendFn == nil {
+		log.Printf("[heartbeat] no SendFn configured, heartbeat disabled")
+		cfg.Interval = 0
+	}
 	return &Runner{cfg: cfg}
 }
 
@@ -54,10 +59,10 @@ func (r *Runner) Run(ctx context.Context) {
 			log.Printf("[heartbeat] stopped for %s", r.cfg.SessionID)
 			return
 		case <-ticker.C:
+			if ctx.Err() != nil {
+				return // Context cancelled between select and send.
+			}
 			if err := r.cfg.SendFn(ctx, r.cfg.Prompt); err != nil {
-				if ctx.Err() != nil {
-					return // Context cancelled, don't log.
-				}
 				log.Printf("[heartbeat] send error for %s: %v", r.cfg.SessionID, err)
 			}
 		}
