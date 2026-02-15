@@ -16,8 +16,8 @@ func TestLoadWorkspace_Empty(t *testing.T) {
 	if prompt == "" {
 		t.Fatal("expected non-empty default system prompt from empty dir")
 	}
-	if !strings.Contains(prompt, "helpful personal assistant") {
-		t.Errorf("expected default soul in prompt, got: %s", prompt)
+	if !strings.Contains(prompt, "AIDaemon") {
+		t.Errorf("expected DefaultSoul in prompt, got: %s", prompt)
 	}
 }
 
@@ -31,8 +31,8 @@ func TestLoadWorkspace_WithSoul(t *testing.T) {
 	if !strings.Contains(prompt, "pirate assistant") {
 		t.Errorf("expected SOUL.md content in prompt, got: %s", prompt)
 	}
-	if strings.Contains(prompt, "helpful personal assistant") {
-		t.Errorf("default soul should not appear when SOUL.md exists")
+	if strings.Contains(prompt, "AIDaemon") {
+		t.Errorf("DefaultSoul should not appear when SOUL.md exists")
 	}
 }
 
@@ -114,8 +114,8 @@ func TestLoadWorkspace_MissingDir(t *testing.T) {
 		t.Fatal("expected non-nil workspace for missing dir")
 	}
 	prompt := w.SystemPrompt()
-	if !strings.Contains(prompt, "helpful personal assistant") {
-		t.Errorf("expected default prompt for missing dir, got: %s", prompt)
+	if !strings.Contains(prompt, "AIDaemon") {
+		t.Errorf("expected DefaultSoul for missing dir, got: %s", prompt)
 	}
 	if w.OverTokenBudget {
 		t.Error("empty workspace should not be over budget")

@@ -31,9 +31,6 @@ func IsAgentWritable(name string) bool {
 	return name == FileMemory || name == FileTools
 }
 
-// defaultSoul is used when no SOUL.md exists in the workspace.
-const defaultSoul = "You are a helpful personal assistant. Be concise and direct."
-
 // tokenBudgetChars is the character threshold (~2K tokens at 3 chars/token)
 // above which we warn about prompt size.
 const tokenBudgetChars = 6000
@@ -89,7 +86,7 @@ func (w *Workspace) SystemPrompt() string {
 	// Soul (or default fallback).
 	soul := w.Soul
 	if soul == "" {
-		soul = defaultSoul
+		soul = DefaultSoul
 	}
 	parts = append(parts, soul)
 

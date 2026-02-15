@@ -52,6 +52,9 @@ func MigrateSystemPrompt(configDir, workspaceDir string) {
 	soulPath := filepath.Join(workspaceDir, FileSoul)
 	if _, err := os.Stat(soulPath); err == nil {
 		return // SOUL.md already exists, skip.
+	} else if !os.IsNotExist(err) {
+		log.Printf("[workspace] cannot stat %s: %v", soulPath, err)
+		return // Unexpected error (e.g., permission denied), don't attempt migration.
 	}
 
 	oldPath := filepath.Join(configDir, "system_prompt.md")

@@ -43,11 +43,23 @@ func TestValidate_NoTelegram_OK(t *testing.T) {
 }
 
 func TestValidate_PartialTelegram_Error(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.TelegramToken = "abc"
-	cfg.TelegramUserID = 0 // missing
-	if err := cfg.validate(); err == nil {
-		t.Error("expected error for partial telegram config")
+	tests := []struct {
+		name  string
+		token string
+		uid   int64
+	}{
+		{"token without uid", "abc", 0},
+		{"uid without token", "", 123},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.TelegramToken = tt.token
+			cfg.TelegramUserID = tt.uid
+			if err := cfg.validate(); err == nil {
+				t.Error("expected error for partial telegram config")
+			}
+		})
 	}
 }
 

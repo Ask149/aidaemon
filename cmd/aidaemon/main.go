@@ -194,6 +194,7 @@ func run() error {
 
 	// 6b. Telegram bot (optional).
 	if cfg.TelegramEnabled() {
+		st.MigrateChatIDs("telegram")
 		tbot, err := telegram.New(telegram.Config{
 			Token:        cfg.TelegramToken,
 			UserID:       cfg.TelegramUserID,
@@ -209,7 +210,11 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("telegram: %w", err)
 		}
-		go tbot.Start(ctx)
+		go func() {
+			if err := tbot.Start(ctx); err != nil {
+				log.Printf("[telegram] error: %v", err)
+			}
+		}()
 		log.Println("[daemon] telegram bot started")
 	} else {
 		log.Println("[daemon] telegram disabled (no token configured)")

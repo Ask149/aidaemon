@@ -23,6 +23,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"github.com/Ask149/aidaemon/internal/channel"
 	"github.com/Ask149/aidaemon/internal/engine"
 	"github.com/Ask149/aidaemon/internal/mcp"
 	"github.com/Ask149/aidaemon/internal/provider"
@@ -50,6 +51,9 @@ type Bot struct {
 	chatMu sync.Map // map[int64]*sync.Mutex
 }
 
+// Compile-time check: *Bot implements channel.Channel.
+var _ channel.Channel = (*Bot)(nil)
+
 // Config for creating a new Bot.
 type Config struct {
 	Token        string
@@ -63,6 +67,9 @@ type Config struct {
 	DataDir      string
 	WorkspaceDir string
 }
+
+// Name returns the channel identifier.
+func (tb *Bot) Name() string { return "telegram" }
 
 // New creates a new Telegram bot. Call Start() to begin polling.
 func New(cfg Config) (*Bot, error) {
@@ -107,9 +114,30 @@ func New(cfg Config) (*Bot, error) {
 }
 
 // Start begins long polling. Blocks until ctx is cancelled.
-func (tb *Bot) Start(ctx context.Context) {
+func (tb *Bot) Start(ctx context.Context) error {
 	log.Printf("[telegram] bot starting (user_id=%d, model=%s)", tb.userID, tb.model)
 	tb.bot.Start(ctx)
+	return nil
+}
+
+// Send delivers a message to the Telegram chat.
+// Implements channel.Channel for server-initiated messages (heartbeat, etc.).
+func (tb *Bot) Send(ctx context.Context, sessionID string, text string) error {
+	// Parse chat ID from session ID (format: "telegram:<chatID>").
+	chatIDStr := sessionID
+	if idx := strings.Index(sessionID, ":"); idx >= 0 {
+		chatIDStr = sessionID[idx+1:]
+	}
+	chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid chat ID in session %q: %w", sessionID, err)
+	}
+
+	_, err = tb.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   text,
+	})
+	return err
 }
 
 // --- Auth middleware ---
@@ -135,7 +163,7 @@ func (tb *Bot) handleMessage(ctx context.Context, b *bot.Bot, update *models.Upd
 	}
 
 	chatID := update.Message.Chat.ID
-	chatIDStr := strconv.FormatInt(chatID, 10)
+	chatIDStr := channel.SessionID("telegram", strconv.FormatInt(chatID, 10))
 
 	// Handle photos (image analysis).
 	if len(update.Message.Photo) > 0 {
@@ -420,7 +448,7 @@ func (tb *Bot) handleContext(ctx context.Context, b *bot.Bot, update *models.Upd
 		return
 	}
 
-	chatIDStr := strconv.FormatInt(update.Message.Chat.ID, 10)
+	chatIDStr := channel.SessionID("telegram", strconv.FormatInt(update.Message.Chat.ID, 10))
 	count, _ := tb.store.MessageCount(chatIDStr)
 	limit := tb.store.Limit()
 
@@ -572,7 +600,7 @@ func (tb *Bot) handleReset(ctx context.Context, b *bot.Bot, update *models.Updat
 	if !tb.isAuthorized(update.Message.Chat.ID) {
 		return
 	}
-	chatIDStr := strconv.FormatInt(update.Message.Chat.ID, 10)
+	chatIDStr := channel.SessionID("telegram", strconv.FormatInt(update.Message.Chat.ID, 10))
 	if err := tb.store.ClearChat(chatIDStr); err != nil {
 		log.Printf("[telegram] clear chat: %v", err)
 		tb.sendText(ctx, update.Message.Chat.ID, "❌ Error clearing conversation.")
@@ -585,7 +613,7 @@ func (tb *Bot) handleStatus(ctx context.Context, b *bot.Bot, update *models.Upda
 	if !tb.isAuthorized(update.Message.Chat.ID) {
 		return
 	}
-	chatIDStr := strconv.FormatInt(update.Message.Chat.ID, 10)
+	chatIDStr := channel.SessionID("telegram", strconv.FormatInt(update.Message.Chat.ID, 10))
 	count, _ := tb.store.MessageCount(chatIDStr)
 	limit := tb.store.Limit()
 
@@ -1256,7 +1284,7 @@ func (tb *Bot) handleMCPImages(ctx context.Context, chatID int64, content string
 // handlePhotoMessage processes image messages with vision models.
 func (tb *Bot) handlePhotoMessage(ctx context.Context, b *bot.Bot, update *models.Update) {
 	chatID := update.Message.Chat.ID
-	chatIDStr := strconv.FormatInt(chatID, 10)
+	chatIDStr := channel.SessionID("telegram", strconv.FormatInt(chatID, 10))
 	caption := update.Message.Caption
 	if caption == "" {
 		caption = "What's in this image?"

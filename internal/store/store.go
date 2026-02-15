@@ -239,6 +239,12 @@ func (s *SQLiteStore) ListSessions() ([]SessionInfo, error) {
 		si.LastActivity = time.Unix(ts, 0)
 		sessions = append(sessions, si)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sessions: %w", err)
+	}
+	if sessions == nil {
+		sessions = []SessionInfo{}
+	}
 	return sessions, nil
 }
 
@@ -328,4 +334,15 @@ func int64sToInterfaces(ids []int64) []interface{} {
 		result[i] = id
 	}
 	return result
+}
+
+// MigrateChatIDs adds a channel prefix to bare chat IDs.
+// Idempotent — skips IDs that already have a prefix.
+func (s *SQLiteStore) MigrateChatIDs(prefix string) error {
+	_, err := s.db.Exec(`
+		UPDATE conversations
+		SET chat_id = ? || ':' || chat_id
+		WHERE chat_id NOT LIKE '%:%'
+	`, prefix)
+	return err
 }

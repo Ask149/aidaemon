@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/Ask149/aidaemon/internal/provider"
@@ -243,13 +244,23 @@ func (m *MemoryStore) Close() error {
 }
 
 func (m *MemoryStore) ListSessions() ([]store.SessionInfo, error) {
-	var sessions []store.SessionInfo
+	sessions := make([]store.SessionInfo, 0, len(m.messages))
 	for chatID, msgs := range m.messages {
+		var latest store.MessageWithID
+		for _, msg := range msgs {
+			if msg.CreatedAt.After(latest.CreatedAt) {
+				latest = msg
+			}
+		}
 		sessions = append(sessions, store.SessionInfo{
 			ChatID:       chatID,
 			MessageCount: len(msgs),
+			LastActivity: latest.CreatedAt,
 		})
 	}
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].LastActivity.After(sessions[j].LastActivity)
+	})
 	return sessions, nil
 }
 

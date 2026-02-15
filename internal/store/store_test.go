@@ -242,10 +242,12 @@ func TestListSessions(t *testing.T) {
 		t.Errorf("expected 0 sessions, got %d", len(sessions))
 	}
 
-	// Add messages to different sessions.
-	st.AddMessage("chat-1", "user", "hello")
-	st.AddMessage("chat-1", "assistant", "hi")
-	st.AddMessage("chat-2", "user", "yo")
+	// Insert messages with explicit timestamps to guarantee ordering.
+	// chat-1: two messages at t=1000 and t=1001
+	// chat-2: one message at t=2000 (more recent)
+	st.db.Exec("INSERT INTO conversations (chat_id, role, content, created_at) VALUES (?, ?, ?, ?)", "chat-1", "user", "hello", 1000)
+	st.db.Exec("INSERT INTO conversations (chat_id, role, content, created_at) VALUES (?, ?, ?, ?)", "chat-1", "assistant", "hi", 1001)
+	st.db.Exec("INSERT INTO conversations (chat_id, role, content, created_at) VALUES (?, ?, ?, ?)", "chat-2", "user", "yo", 2000)
 
 	sessions, err = st.ListSessions()
 	if err != nil {
@@ -266,6 +268,11 @@ func TestListSessions(t *testing.T) {
 	}
 	if s, ok := sessionMap["chat-2"]; !ok || s.MessageCount != 1 {
 		t.Errorf("chat-2: expected 1 message, got %+v", sessionMap["chat-2"])
+	}
+
+	// Verify ordering: most recently active first (chat-2 has t=2000, chat-1 has t=1001).
+	if len(sessions) >= 2 && sessions[0].ChatID != "chat-2" {
+		t.Errorf("expected most recent session first, got %s", sessions[0].ChatID)
 	}
 }
 
