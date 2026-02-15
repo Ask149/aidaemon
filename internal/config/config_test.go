@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWorkspaceDir_Default(t *testing.T) {
@@ -80,6 +81,27 @@ func TestTelegramEnabled(t *testing.T) {
 			cfg := &Config{TelegramToken: tt.token, TelegramUserID: tt.uid}
 			if got := cfg.TelegramEnabled(); got != tt.want {
 				t.Errorf("TelegramEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHeartbeatDuration(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval int
+		want     time.Duration
+	}{
+		{"zero disabled", 0, 0},
+		{"negative disabled", -1, 0},
+		{"one minute", 1, 1 * time.Minute},
+		{"thirty minutes", 30, 30 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{HeartbeatInterval: tt.interval}
+			if got := cfg.HeartbeatDuration(); got != tt.want {
+				t.Errorf("HeartbeatDuration() = %v, want %v", got, tt.want)
 			}
 		})
 	}

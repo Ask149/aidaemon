@@ -226,11 +226,12 @@ func run() error {
 
 	// 7. Heartbeat (optional).
 	if hbDur := cfg.HeartbeatDuration(); hbDur > 0 && cfg.TelegramEnabled() {
+		sid := channel.SessionID("telegram", strconv.FormatInt(cfg.TelegramUserID, 10))
 		hb := heartbeat.New(heartbeat.Config{
 			Interval:  hbDur,
-			SessionID: channel.SessionID("telegram", strconv.FormatInt(cfg.TelegramUserID, 10)),
+			SessionID: sid,
 			SendFn: func(ctx context.Context, text string) error {
-				return tbot.Send(ctx, channel.SessionID("telegram", strconv.FormatInt(cfg.TelegramUserID, 10)), text)
+				return tbot.Send(ctx, sid, text)
 			},
 			Prompt: "This is a periodic check-in. Review your MEMORY.md, check if there's anything timely to mention, and if nothing urgent, respond with HEARTBEAT_OK.",
 		})
