@@ -41,6 +41,10 @@ type Config struct {
 	// Data directory for media, logs, etc. (default: ~/.config/aidaemon/data).
 	DataDir string `json:"data_dir"`
 
+	// Workspace directory for persona files (SOUL.md, MEMORY.md, etc.).
+	// Default: ~/.config/aidaemon/workspace
+	WorkspaceDir string `json:"workspace_dir"`
+
 	// Brave Search API key (optional — enables higher-quality web search).
 	// Get a free key at https://brave.com/search/api/ (2000 queries/month).
 	// When empty, web_search falls back to DuckDuckGo HTML scraping.
@@ -141,6 +145,10 @@ func Load() (*Config, error) {
 		os.MkdirAll(filepath.Join(cfg.DataDir, sub), 0700)
 	}
 
+	// Ensure workspace directory exists.
+	wsDir := cfg.ResolvedWorkspaceDir()
+	os.MkdirAll(wsDir, 0700)
+
 	// Load system prompt from file if it exists.
 	cfg.SystemPrompt = loadSystemPrompt(cfg.SystemPrompt)
 
@@ -172,6 +180,16 @@ func (c *Config) ConversationLimit() int {
 	return c.MaxConversationMessages
 }
 
+// ResolvedWorkspaceDir returns the workspace directory path.
+// Falls back to ~/.config/aidaemon/workspace if not configured.
+func (c *Config) ResolvedWorkspaceDir() string {
+	if c.WorkspaceDir != "" {
+		return c.WorkspaceDir
+	}
+	dir, _ := configDir()
+	return filepath.Join(dir, "workspace")
+}
+
 // HeartbeatDuration is a placeholder for future heartbeat support.
 // Currently unused but keeps the config extensible.
 func (c *Config) HeartbeatDuration() time.Duration {
@@ -196,20 +214,21 @@ func configPath() (string, error) {
 
 // loadSystemPrompt loads system prompt from file if it exists.
 // If prompt is empty or starts with "@", tries to load from:
-//   ~/.config/aidaemon/system_prompt.md
+//
+//	~/.config/aidaemon/system_prompt.md
 func loadSystemPrompt(prompt string) string {
 	if prompt == "" || strings.HasPrefix(prompt, "@") {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return prompt
 		}
-		
+
 		promptPath := filepath.Join(home, ".config", "aidaemon", "system_prompt.md")
 		data, err := os.ReadFile(promptPath)
 		if err == nil {
 			return string(data)
 		}
 	}
-	
+
 	return prompt
 }
