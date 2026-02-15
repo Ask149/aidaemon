@@ -17,11 +17,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/Ask149/aidaemon/internal/auth"
+	"github.com/Ask149/aidaemon/internal/channel"
 	"github.com/Ask149/aidaemon/internal/config"
+	"github.com/Ask149/aidaemon/internal/heartbeat"
 	"github.com/Ask149/aidaemon/internal/httpapi"
 	"github.com/Ask149/aidaemon/internal/mcp"
 	"github.com/Ask149/aidaemon/internal/permissions"
@@ -193,9 +196,10 @@ func run() error {
 	}
 
 	// 6b. Telegram bot (optional).
+	var tbot *telegram.Bot
 	if cfg.TelegramEnabled() {
 		st.MigrateChatIDs("telegram")
-		tbot, err := telegram.New(telegram.Config{
+		tbot, err = telegram.New(telegram.Config{
 			Token:        cfg.TelegramToken,
 			UserID:       cfg.TelegramUserID,
 			Provider:     prov,
@@ -218,6 +222,20 @@ func run() error {
 		log.Println("[daemon] telegram bot started")
 	} else {
 		log.Println("[daemon] telegram disabled (no token configured)")
+	}
+
+	// 7. Heartbeat (optional).
+	if hbDur := cfg.HeartbeatDuration(); hbDur > 0 && cfg.TelegramEnabled() {
+		hb := heartbeat.New(heartbeat.Config{
+			Interval:  hbDur,
+			SessionID: channel.SessionID("telegram", strconv.FormatInt(cfg.TelegramUserID, 10)),
+			SendFn: func(ctx context.Context, text string) error {
+				return tbot.Send(ctx, channel.SessionID("telegram", strconv.FormatInt(cfg.TelegramUserID, 10)), text)
+			},
+			Prompt: "This is a periodic check-in. Review your MEMORY.md, check if there's anything timely to mention, and if nothing urgent, respond with HEARTBEAT_OK.",
+		})
+		go hb.Run(ctx)
+		log.Printf("[daemon] heartbeat started (interval=%s)", hbDur)
 	}
 
 	// Block until shutdown signal.

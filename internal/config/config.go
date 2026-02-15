@@ -64,6 +64,9 @@ type Config struct {
 
 	// Bearer token for the HTTP API (optional). If empty, API is disabled.
 	APIToken string `json:"api_token,omitempty"`
+
+	// HeartbeatInterval in minutes. 0 = disabled. Default: 0.
+	HeartbeatInterval int `json:"heartbeat_interval"`
 }
 
 // ToolPermissionRule mirrors permissions.Rule for JSON config.
@@ -199,10 +202,13 @@ func (c *Config) ResolvedWorkspaceDir() string {
 	return filepath.Join(dir, "workspace")
 }
 
-// HeartbeatDuration is a placeholder for future heartbeat support.
-// Currently unused but keeps the config extensible.
+// HeartbeatDuration returns the heartbeat interval as a time.Duration.
+// Returns 0 (disabled) if HeartbeatInterval is <= 0.
 func (c *Config) HeartbeatDuration() time.Duration {
-	return 30 * time.Minute
+	if c.HeartbeatInterval <= 0 {
+		return 0
+	}
+	return time.Duration(c.HeartbeatInterval) * time.Minute
 }
 
 func configDir() (string, error) {
