@@ -83,16 +83,24 @@ func TestLoadWorkspace_AllFiles(t *testing.T) {
 	}
 }
 
-func TestLoadWorkspace_TokenWarning(t *testing.T) {
-	dir := t.TempDir()
-	// Write a MEMORY.md that exceeds the 6000 char budget.
-	bigContent := strings.Repeat("x", 6001)
-	writeTestFile(t, dir, FileMemory, bigContent)
-
-	w := Load(dir)
-
-	if !w.OverTokenBudget {
-		t.Error("expected OverTokenBudget=true for large workspace")
+func TestLoadWorkspace_TokenBudget(t *testing.T) {
+	tests := []struct {
+		name     string
+		size     int
+		wantOver bool
+	}{
+		{"at_limit", 6000, false},
+		{"over_limit", 6001, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTestFile(t, dir, FileMemory, strings.Repeat("x", tt.size))
+			w := Load(dir)
+			if w.OverTokenBudget != tt.wantOver {
+				t.Errorf("size=%d: got OverTokenBudget=%v, want %v", tt.size, w.OverTokenBudget, tt.wantOver)
+			}
+		})
 	}
 }
 
@@ -115,16 +123,16 @@ func TestLoadWorkspace_MissingDir(t *testing.T) {
 }
 
 func TestAgentWritableFiles(t *testing.T) {
-	if !AgentWritableFiles[FileMemory] {
+	if !IsAgentWritable(FileMemory) {
 		t.Error("MEMORY.md should be agent-writable")
 	}
-	if !AgentWritableFiles[FileTools] {
+	if !IsAgentWritable(FileTools) {
 		t.Error("TOOLS.md should be agent-writable")
 	}
-	if AgentWritableFiles[FileSoul] {
+	if IsAgentWritable(FileSoul) {
 		t.Error("SOUL.md should not be agent-writable")
 	}
-	if AgentWritableFiles[FileUser] {
+	if IsAgentWritable(FileUser) {
 		t.Error("USER.md should not be agent-writable")
 	}
 }

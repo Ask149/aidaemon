@@ -26,10 +26,9 @@ const (
 	FileTools  = "TOOLS.md"
 )
 
-// AgentWritableFiles lists the files the agent is allowed to modify.
-var AgentWritableFiles = map[string]bool{
-	FileMemory: true,
-	FileTools:  true,
+// IsAgentWritable reports whether the named file can be modified by the agent.
+func IsAgentWritable(name string) bool {
+	return name == FileMemory || name == FileTools
 }
 
 // defaultSoul is used when no SOUL.md exists in the workspace.
