@@ -211,6 +211,13 @@ func (c *Config) ResolvedWorkspaceDir() string {
 	return filepath.Join(dir, "workspace")
 }
 
+// ResolvedSkillsDir returns the skills directory path.
+// Default: ~/.config/aidaemon/skills
+func (c *Config) ResolvedSkillsDir() string {
+	dir, _ := configDir()
+	return filepath.Join(dir, "skills")
+}
+
 // HeartbeatDuration returns the heartbeat interval as a time.Duration.
 // Returns 0 (disabled) if HeartbeatInterval is <= 0.
 func (c *Config) HeartbeatDuration() time.Duration {

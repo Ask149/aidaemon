@@ -7,6 +7,9 @@
 //   - MEMORY.md — agent's evolving memory (agent-writable)
 //   - TOOLS.md  — agent's notes about available tools (agent-writable)
 //
+// Additionally, skill files (*.md) are loaded from a separate skills
+// directory and injected into the system prompt as an Active Skills section.
+//
 // Missing files are silently skipped. The assembled prompt is refreshed
 // on every message, so edits take effect immediately.
 package workspace

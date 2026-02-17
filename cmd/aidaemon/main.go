@@ -170,10 +170,11 @@ func run() error {
 
 	// 5d. Load workspace (re-read per message, but load once here for initial prompt).
 	wsDir := cfg.ResolvedWorkspaceDir()
-	ws := workspace.Load(wsDir)
+	skillsDir := cfg.ResolvedSkillsDir()
+	ws := workspace.Load(wsDir, skillsDir)
 	initialPrompt := ws.SystemPrompt()
-	log.Printf("[daemon] workspace: %s (soul=%d, user=%d, memory=%d, tools=%d chars)",
-		wsDir, len(ws.Soul), len(ws.User), len(ws.Memory), len(ws.Tools))
+	log.Printf("[daemon] workspace: %s (soul=%d, user=%d, memory=%d, tools=%d, skills=%d chars)",
+		wsDir, len(ws.Soul), len(ws.User), len(ws.Memory), len(ws.Tools), len(ws.Skills))
 
 	// 5e. Create session manager.
 	mgr := session.NewManager(session.ManagerConfig{
@@ -184,7 +185,7 @@ func run() error {
 		Threshold:    0.8,
 		WorkspaceDir: wsDir,
 		SystemPromptFunc: func() string {
-			return workspace.Load(wsDir).SystemPrompt()
+			return workspace.Load(wsDir, skillsDir).SystemPrompt()
 		},
 	})
 	log.Printf("[daemon] session manager created")
@@ -240,6 +241,7 @@ func run() error {
 			Model:          cfg.ChatModel,
 			SysPrompt:      initialPrompt,
 			WorkspaceDir:   wsDir,
+			SkillsDir:      skillsDir,
 			WSHandler:      wsCh.Handler(),
 			SessionManager: mgr,
 		})
@@ -267,6 +269,7 @@ func run() error {
 			ToolRegistry: registry,
 			DataDir:      cfg.DataDir,
 			WorkspaceDir: wsDir,
+			SkillsDir:    skillsDir,
 			SessionMgr:   mgr,
 		})
 		if err != nil {

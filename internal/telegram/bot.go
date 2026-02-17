@@ -47,6 +47,7 @@ type Bot struct {
 	botToken     string // needed for file download URLs
 	dataDir      string // root for media/logs/files persistence
 	workspaceDir string // workspace directory for dynamic system prompts
+	skillsDir    string // skills directory for skill loading
 
 	// Guards per-chat to prevent concurrent LLM calls for the same chat.
 	chatMu sync.Map // map[int64]*sync.Mutex
@@ -74,6 +75,7 @@ type Config struct {
 	ToolRegistry *tools.Registry
 	DataDir      string
 	WorkspaceDir string
+	SkillsDir    string
 	SessionMgr   SessionManager // optional: enables /new and /title commands
 }
 
@@ -94,6 +96,7 @@ func New(cfg Config) (*Bot, error) {
 		botToken:     cfg.Token,
 		dataDir:      cfg.DataDir,
 		workspaceDir: cfg.WorkspaceDir,
+		skillsDir:    cfg.SkillsDir,
 	}
 
 	// Initialize the chat engine for tool-call orchestration.
@@ -504,7 +507,7 @@ func (tb *Bot) handleContext(ctx context.Context, b *bot.Bot, update *models.Upd
 	// System prompt size.
 	sysPrompt := tb.sysPrompt
 	if tb.workspaceDir != "" {
-		ws := workspace.Load(tb.workspaceDir)
+		ws := workspace.Load(tb.workspaceDir, tb.skillsDir)
 		sysPrompt = ws.SystemPrompt()
 	}
 	sysPromptTokens := len(sysPrompt) / 3
@@ -827,7 +830,7 @@ func (tb *Bot) buildMessages(chatIDStr string) ([]provider.Message, error) {
 	// Re-read workspace files for fresh system prompt.
 	sysPrompt := tb.sysPrompt
 	if tb.workspaceDir != "" {
-		ws := workspace.Load(tb.workspaceDir)
+		ws := workspace.Load(tb.workspaceDir, tb.skillsDir)
 		sysPrompt = ws.SystemPrompt()
 	}
 	if sysPrompt != "" {

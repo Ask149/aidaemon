@@ -43,6 +43,7 @@ type Config struct {
 	Model          string            `json:"model"`
 	SysPrompt      string            `json:"sys_prompt"`
 	WorkspaceDir   string            `json:"workspace_dir"`
+	SkillsDir      string            `json:"skills_dir"`
 	WSHandler      http.Handler      `json:"-"` // Optional WebSocket upgrade handler.
 	SessionManager interface {
 		GetSession(id string) (*store.Session, error)
@@ -188,7 +189,7 @@ func (a *API) handleChat(w http.ResponseWriter, r *http.Request) {
 	// Re-read workspace for fresh system prompt.
 	sysPrompt := a.cfg.SysPrompt
 	if a.cfg.WorkspaceDir != "" {
-		ws := workspace.Load(a.cfg.WorkspaceDir)
+		ws := workspace.Load(a.cfg.WorkspaceDir, a.cfg.SkillsDir)
 		sysPrompt = ws.SystemPrompt()
 	}
 	if sysPrompt != "" {
