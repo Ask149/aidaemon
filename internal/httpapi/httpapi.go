@@ -16,6 +16,9 @@
 //	POST /cron/jobs          — create a new cron job
 //	PATCH /cron/jobs/{id}    — update a cron job (enable/disable, rename)
 //	DELETE /cron/jobs/{id}   — delete a cron job
+//	POST /hooks/wake        — trigger a webhook (async or sync)
+//	GET  /hooks/runs        — list recent webhook runs
+//	GET  /hooks/runs/{id}   — get a specific webhook run
 //
 // All endpoints except /health, /ws, and static files require a Bearer token.
 package httpapi
@@ -28,6 +31,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +61,17 @@ type Config struct {
 		ListSessions(channel string) ([]store.Session, error)
 		RenameSession(id, title string) error
 	} `json:"-"` // Optional session lifecycle manager.
+
+	// WebhookSender delivers async webhook output to a channel.
+	WebhookSender interface {
+		SendCronOutput(ctx context.Context, channelType, channelMeta, text string) error
+	} `json:"-"`
+
+	// WebhookChannelType is the default channel for async webhook delivery ("telegram").
+	WebhookChannelType string `json:"-"`
+
+	// WebhookChannelMeta is the default channel metadata (e.g., `{"chat_id":12345}`).
+	WebhookChannelMeta string `json:"-"`
 }
 
 // API is the HTTP server.
@@ -89,6 +104,9 @@ func New(cfg Config) *API {
 	mux.HandleFunc("POST /cron/jobs", api.requireAuth(api.handleCreateCronJob))
 	mux.HandleFunc("PATCH /cron/jobs/{id}", api.requireAuth(api.handleUpdateCronJob))
 	mux.HandleFunc("DELETE /cron/jobs/{id}", api.requireAuth(api.handleDeleteCronJob))
+	mux.HandleFunc("POST /hooks/wake", api.requireAuth(api.handleWebhookWake))
+	mux.HandleFunc("GET /hooks/runs", api.requireAuth(api.handleListWebhookRuns))
+	mux.HandleFunc("GET /hooks/runs/{id}", api.requireAuth(api.handleGetWebhookRun))
 
 	// Mount WebSocket handler (unauthenticated — uses per-connection session IDs).
 	if cfg.WSHandler != nil {
@@ -127,6 +145,11 @@ func (a *API) Start(ctx context.Context) error {
 		return fmt.Errorf("http listen: %w", err)
 	}
 	return nil
+}
+
+// Handler returns the HTTP handler (for testing).
+func (a *API) Handler() http.Handler {
+	return a.server.Handler
 }
 
 // ---------- middleware ----------
@@ -542,4 +565,189 @@ func (a *API) handleDeleteCronJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResp(w, http.StatusOK, map[string]string{"status": "deleted", "id": id})
+}
+
+// --- Webhook handlers ---
+
+type webhookWakeRequest struct {
+	Prompt  string          `json:"prompt"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+	Source  string          `json:"source,omitempty"`
+}
+
+type webhookWakeResponse struct {
+	RunID  string `json:"run_id"`
+	Status string `json:"status"`
+	Output string `json:"output,omitempty"`
+}
+
+func (a *API) handleWebhookWake(w http.ResponseWriter, r *http.Request) {
+	var req webhookWakeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if req.Prompt == "" {
+		jsonError(w, http.StatusBadRequest, "prompt is required")
+		return
+	}
+
+	// Generate run ID.
+	b := make([]byte, 8)
+	rand.Read(b)
+	runID := "wh_" + hex.EncodeToString(b)
+
+	// Build the full prompt: user prompt + optional payload context.
+	fullPrompt := req.Prompt
+	if len(req.Payload) > 0 && string(req.Payload) != "null" {
+		formatted, _ := json.MarshalIndent(json.RawMessage(req.Payload), "", "  ")
+		fullPrompt = req.Prompt + "\n\nEvent payload:\n```json\n" + string(formatted) + "\n```"
+	}
+
+	// Determine channel config.
+	channelType := a.cfg.WebhookChannelType
+	channelMeta := a.cfg.WebhookChannelMeta
+	if channelType == "" {
+		channelType = "telegram"
+	}
+	if channelMeta == "" {
+		channelMeta = "{}"
+	}
+
+	// Persist the run.
+	run := store.WebhookRun{
+		ID:          runID,
+		Prompt:      req.Prompt,
+		Payload:     string(req.Payload),
+		Source:      req.Source,
+		ChannelType: channelType,
+		ChannelMeta: channelMeta,
+		Status:      "running",
+		StartedAt:   time.Now(),
+	}
+	if err := a.cfg.Store.CreateWebhookRun(run); err != nil {
+		jsonError(w, http.StatusInternalServerError, "store error: "+err.Error())
+		return
+	}
+
+	// Sync mode: block and return the result.
+	sync := r.URL.Query().Get("sync") == "true"
+	if sync {
+		output, status := a.executeWebhook(r.Context(), runID, fullPrompt, channelType, channelMeta, false)
+		jsonResp(w, http.StatusOK, webhookWakeResponse{
+			RunID:  runID,
+			Status: status,
+			Output: output,
+		})
+		return
+	}
+
+	// Async mode: return 202 immediately, execute in background.
+	jsonResp(w, http.StatusAccepted, webhookWakeResponse{
+		RunID:  runID,
+		Status: "running",
+	})
+
+	go a.executeWebhook(context.Background(), runID, fullPrompt, channelType, channelMeta, true)
+}
+
+// executeWebhook runs the LLM engine and updates the webhook run record.
+// If sendToChannel is true, delivers output to the configured channel (Telegram).
+// Returns the output and final status.
+func (a *API) executeWebhook(ctx context.Context, runID, fullPrompt, channelType, channelMeta string, sendToChannel bool) (string, string) {
+	// Build system prompt.
+	sysPrompt := a.cfg.SysPrompt
+	if a.cfg.WorkspaceDir != "" {
+		ws := workspace.Load(a.cfg.WorkspaceDir, a.cfg.SkillsDir)
+		sysPrompt = ws.SystemPrompt()
+	}
+
+	messages := []provider.Message{
+		{Role: "system", Content: sysPrompt},
+		{Role: "user", Content: fullPrompt},
+	}
+
+	result, err := a.engine.Run(ctx, messages, engine.RunOptions{
+		Model:         a.cfg.Model,
+		MaxIterations: 25,
+	})
+
+	var output, status string
+	if err != nil {
+		status = "failed"
+		if result != nil && result.Content != "" {
+			output = result.Content
+		} else {
+			output = err.Error()
+		}
+		log.Printf("[webhook] run %s failed: %v", runID, err)
+	} else {
+		status = "completed"
+		output = result.Content
+		log.Printf("[webhook] run %s completed (%s)", runID, result.Duration.Round(time.Millisecond))
+	}
+
+	// Update the run record.
+	finished := time.Now()
+	if updateErr := a.cfg.Store.UpdateWebhookRun(runID, status, output, finished); updateErr != nil {
+		log.Printf("[webhook] update run %s: %v", runID, updateErr)
+	}
+
+	// Deliver to channel (async only).
+	if sendToChannel && a.cfg.WebhookSender != nil && output != "" {
+		prefix := "🔔 Webhook"
+		// Include source in prefix if provided.
+		run, _ := a.cfg.Store.GetWebhookRun(runID)
+		if run != nil && run.Source != "" {
+			prefix = "🔔 Webhook [" + run.Source + "]"
+		}
+		text := prefix + ":\n\n" + output
+		if sendErr := a.cfg.WebhookSender.SendCronOutput(ctx, channelType, channelMeta, text); sendErr != nil {
+			log.Printf("[webhook] send output for run %s: %v", runID, sendErr)
+		}
+	}
+
+	return output, status
+}
+
+func (a *API) handleListWebhookRuns(w http.ResponseWriter, r *http.Request) {
+	limit := 20
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	runs, err := a.cfg.Store.ListWebhookRuns(limit, offset)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResp(w, http.StatusOK, runs)
+}
+
+func (a *API) handleGetWebhookRun(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, http.StatusBadRequest, "run id is required")
+		return
+	}
+
+	run, err := a.cfg.Store.GetWebhookRun(id)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if run == nil {
+		jsonError(w, http.StatusNotFound, "run not found")
+		return
+	}
+
+	jsonResp(w, http.StatusOK, run)
 }

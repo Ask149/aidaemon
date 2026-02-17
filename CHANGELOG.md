@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-02-17
+
+### Added
+- **Webhook triggers** — `POST /hooks/wake` endpoint for external services to trigger the daemon via HTTP
+  - Async mode (default): returns `202 Accepted`, executes in background, delivers output to Telegram with `🔔 Webhook` prefix
+  - Sync mode: add `?sync=true` query param to wait for LLM response in HTTP body
+  - Accepts plain text prompts and structured JSON event payloads (`payload` field)
+  - Optional `source` label for identifying trigger origin (e.g., "datadog", "github-actions")
+  - Run history: `GET /hooks/runs` (list) and `GET /hooks/runs/{id}` (detail)
+  - SQLite persistence (`webhook_runs` table) — survives daemon restarts
+  - Reuses existing auth (Bearer token) and CronSender for Telegram delivery
+
 ## [2.1.0] — 2026-02-17
 
 ### Added
@@ -108,7 +120,8 @@ First complete release with all core features.
 - Pre-commit hook to block accidental credential commits
 - Dual logging (stderr + file)
 
-[Unreleased]: https://github.com/Ask149/aidaemon/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/Ask149/aidaemon/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/Ask149/aidaemon/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/Ask149/aidaemon/compare/v2.0.1...v2.1.0
 [2.0.0]: https://github.com/Ask149/aidaemon/compare/v0.1.0...v2.0.0
 [0.1.0]: https://github.com/Ask149/aidaemon/releases/tag/v0.1.0

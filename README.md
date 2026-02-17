@@ -11,6 +11,7 @@ Chat with GPT-5, Claude Opus 4.6, Gemini 3 Pro, and 10+ other models from your p
 - **Auto-rotation** — daily 4AM rotation with memory flush and summary
 - **Skill files** — drop `.md` files into `~/.config/aidaemon/skills/` to inject custom instructions
 - **Scheduled tasks** — create cron jobs via natural language in Telegram (e.g., "Every weekday at 9am, check my calendar")
+- **Webhook triggers** — `POST /hooks/wake` endpoint for external services to trigger the daemon (async or sync)
 - **Smart context** — load recent daily memory logs (last 3 days) into system prompt
 - **Streaming responses** — live typing indicators with adaptive debounce
 - **Tool execution** — read/write files, run shell commands, search the web
@@ -170,6 +171,9 @@ REST endpoints for programmatic access:
 | `/cron/jobs` | POST | Create a cron job (body: `{"label", "cron_expr", "mode", "payload"}`) |
 | `/cron/jobs/{id}` | PATCH | Update a cron job (enable/disable, rename) |
 | `/cron/jobs/{id}` | DELETE | Delete a cron job |
+| `/hooks/wake` | POST | Trigger a webhook (`?sync=true` for sync mode) |
+| `/hooks/runs` | GET | List recent webhook runs (`?limit=20&offset=0`) |
+| `/hooks/runs/{id}` | GET | Get a specific webhook run by ID |
 | `/health` | GET | Health check (no auth required) |
 
 All endpoints require `Authorization: Bearer <token>` header (token from config).
@@ -406,6 +410,62 @@ curl -X DELETE http://localhost:8420/cron/jobs/cj_abc123 \
 
 Supports `*`, ranges (`1-5`), lists (`1,3,5`), and steps (`*/15`).
 
+## Webhook Triggers
+
+External services can trigger the daemon via HTTP by posting to `POST /hooks/wake`. This is useful for connecting monitoring alerts, CI/CD pipelines, form submissions, or any service that can send an HTTP request.
+
+**Two execution modes:**
+- **Async** (default) — returns `202 Accepted` immediately, executes in the background, delivers output to Telegram
+- **Sync** — add `?sync=true` to wait for the LLM response in the HTTP body
+
+**Simple text prompt:**
+```bash
+# Async — fires and sends result to Telegram
+curl -X POST http://localhost:8420/hooks/wake \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Check if my server is healthy"}'
+
+# Sync — waits for the response
+curl -X POST "http://localhost:8420/hooks/wake?sync=true" \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Summarize this alert", "source": "datadog"}'
+```
+
+**Structured event payload:**
+```bash
+curl -X POST http://localhost:8420/hooks/wake \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Analyze this deployment event",
+    "source": "github-actions",
+    "payload": {"repo": "myapp", "status": "failed", "commit": "abc123"}
+  }'
+```
+
+The `payload` field accepts any JSON object — it's appended to the prompt and interpreted by the LLM.
+
+**Checking run history:**
+```bash
+# List recent runs
+curl http://localhost:8420/hooks/runs \
+  -H "Authorization: Bearer TOKEN"
+
+# Get a specific run
+curl http://localhost:8420/hooks/runs/wh_abc123 \
+  -H "Authorization: Bearer TOKEN"
+```
+
+**Request body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `prompt` | string | yes | The instruction for the LLM |
+| `payload` | object | no | Arbitrary JSON data appended to prompt |
+| `source` | string | no | Label for the trigger source (e.g., "datadog", "github") |
+
 ## Architecture
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed technical documentation.
@@ -416,12 +476,12 @@ You (Telegram) ──→ Telegram Bot ──→ Copilot API (13+ models)
                         │              Tool calls
                         │                    │
                    SQLite Store    ┌─────────┴─────────┐
-                                   │                   │
-                              Built-in Tools      MCP Servers
-                              (6 tools)           (70+ tools)
-                                   │                   │
-                             Files, Shell,      Browser, Calendar,
-                             Web Search         Notes, Memory, ...
+                        │          │                   │
+                   Cron Engine  Built-in Tools      MCP Servers
+                        │       (6 tools)           (70+ tools)
+                        │            │                   │
+                   Webhooks    Files, Shell,      Browser, Calendar,
+                (POST /hooks)  Web Search         Notes, Memory, ...
 ```
 
 ## Project Structure

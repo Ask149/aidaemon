@@ -338,6 +338,13 @@ func (m *MemoryStore) DueCronJobs(_ time.Time) ([]store.CronJob, error) { return
 func (m *MemoryStore) CreateCronRun(_ store.CronRun) error              { return nil }
 func (m *MemoryStore) PruneCronRuns(_ string, _ int) error              { return nil }
 
+// --- Webhook stubs (satisfy Conversation interface; not exercised by session tests) ---
+
+func (m *MemoryStore) CreateWebhookRun(_ store.WebhookRun) error            { return nil }
+func (m *MemoryStore) UpdateWebhookRun(_, _, _ string, _ time.Time) error   { return nil }
+func (m *MemoryStore) GetWebhookRun(_ string) (*store.WebhookRun, error)    { return nil, nil }
+func (m *MemoryStore) ListWebhookRuns(_, _ int) ([]store.WebhookRun, error) { return nil, nil }
+
 // TempDir creates a temporary directory for testing file operations.
 // Returns the path. Cleaned up automatically when the test finishes.
 func TempDir(t *testing.T) string {

@@ -239,30 +239,6 @@ func run() error {
 	})
 	log.Println("[daemon] websocket channel ready")
 
-	// 6b. HTTP API (optional — requires api_token and port > 0).
-	if cfg.APIToken != "" && cfg.Port > 0 {
-		api := httpapi.New(httpapi.Config{
-			Port:           cfg.Port,
-			Token:          cfg.APIToken,
-			Store:          st,
-			Registry:       registry,
-			Provider:       prov,
-			Model:          cfg.ChatModel,
-			SysPrompt:      initialPrompt,
-			WorkspaceDir:   wsDir,
-			SkillsDir:      skillsDir,
-			WSHandler:      wsCh.Handler(),
-			SessionManager: mgr,
-		})
-		go func() {
-			if err := api.Start(ctx); err != nil {
-				log.Printf("[httpapi] error: %v", err)
-			}
-		}()
-	} else if cfg.Port > 0 {
-		log.Printf("[daemon] HTTP API disabled (set api_token in config to enable)")
-	}
-
 	// 6c. Telegram bot (optional).
 	var tbot *telegram.Bot
 	if cfg.TelegramEnabled() {
@@ -318,6 +294,34 @@ func run() error {
 				return tbot.Send(ctx, sid, text)
 			},
 		}
+	}
+
+	// 8b. HTTP API (optional — requires api_token and port > 0).
+	// Placed after cronSender so webhook async delivery can reuse it.
+	if cfg.APIToken != "" && cfg.Port > 0 {
+		api := httpapi.New(httpapi.Config{
+			Port:               cfg.Port,
+			Token:              cfg.APIToken,
+			Store:              st,
+			Registry:           registry,
+			Provider:           prov,
+			Model:              cfg.ChatModel,
+			SysPrompt:          initialPrompt,
+			WorkspaceDir:       wsDir,
+			SkillsDir:          skillsDir,
+			WSHandler:          wsCh.Handler(),
+			SessionManager:     mgr,
+			WebhookSender:      cronSender,
+			WebhookChannelType: "telegram",
+			WebhookChannelMeta: fmt.Sprintf(`{"chat_id":%d}`, cfg.TelegramUserID),
+		})
+		go func() {
+			if err := api.Start(ctx); err != nil {
+				log.Printf("[httpapi] error: %v", err)
+			}
+		}()
+	} else if cfg.Port > 0 {
+		log.Printf("[daemon] HTTP API disabled (set api_token in config to enable)")
 	}
 
 	cronEngine := &engine.Engine{

@@ -68,6 +68,20 @@ type CronRun struct {
 	Output     string     `json:"output"`
 }
 
+// WebhookRun records a single webhook invocation.
+type WebhookRun struct {
+	ID          string     `json:"id"`
+	Prompt      string     `json:"prompt"`
+	Payload     string     `json:"payload,omitempty"` // JSON string of event payload
+	Source      string     `json:"source,omitempty"`  // caller label (e.g., "github")
+	ChannelType string     `json:"channel_type"`
+	ChannelMeta string     `json:"channel_meta"` // JSON
+	Status      string     `json:"status"`       // "running", "completed", "failed"
+	Output      string     `json:"output,omitempty"`
+	StartedAt   time.Time  `json:"started_at"`
+	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+}
+
 // MessageWithID is a Message with its database row ID.
 type MessageWithID struct {
 	ID        int64     `json:"id"`
@@ -144,6 +158,20 @@ type Conversation interface {
 
 	// PruneCronRuns keeps only the most recent N runs per job.
 	PruneCronRuns(jobID string, keep int) error
+
+	// --- Webhook runs ---
+
+	// CreateWebhookRun inserts a new webhook run record.
+	CreateWebhookRun(run WebhookRun) error
+
+	// UpdateWebhookRun updates a webhook run's status, output, and finished time.
+	UpdateWebhookRun(id, status, output string, finishedAt time.Time) error
+
+	// GetWebhookRun returns a webhook run by ID, or nil if not found.
+	GetWebhookRun(id string) (*WebhookRun, error)
+
+	// ListWebhookRuns returns recent webhook runs, newest first.
+	ListWebhookRuns(limit, offset int) ([]WebhookRun, error)
 
 	// Close closes the underlying storage.
 	Close() error
@@ -225,6 +253,11 @@ func (s *SQLiteStore) migrate() error {
 
 	// Migrate cron jobs tables.
 	if err := s.migrateCronJobs(); err != nil {
+		return err
+	}
+
+	// Migrate webhook runs table.
+	if err := s.migrateWebhookRuns(); err != nil {
 		return err
 	}
 
