@@ -23,9 +23,17 @@ var _ channel.Channel = (*Channel)(nil)
 // OnMessageFunc handles an incoming message and returns a reply.
 type OnMessageFunc func(ctx context.Context, sessionID, text string) (string, error)
 
+// OnNewSessionFunc handles a /new command and returns the new session ID.
+type OnNewSessionFunc func(ctx context.Context, sessionID string) (newSessionID string, err error)
+
+// OnRenameSessionFunc handles a /title command.
+type OnRenameSessionFunc func(ctx context.Context, sessionID, title string) error
+
 // Config for the WebSocket channel.
 type Config struct {
-	OnMessage OnMessageFunc
+	OnMessage       OnMessageFunc
+	OnNewSession    OnNewSessionFunc
+	OnRenameSession OnRenameSessionFunc
 }
 
 // Channel handles WebSocket connections for chat.
@@ -87,14 +95,20 @@ func (c *Channel) SendImage(ctx context.Context, sessionID string, dataURL strin
 }
 
 type wsIncoming struct {
-	Message   string `json:"message"`
+	Type      string `json:"type,omitempty"`    // "message" (default), "command"
+	Message   string `json:"message,omitempty"` // for type="message"
+	Command   string `json:"command,omitempty"` // for type="command": "new", "title"
+	Text      string `json:"text,omitempty"`    // for command="title"
 	SessionID string `json:"session_id,omitempty"`
 }
 
 type wsMessage struct {
-	Reply string `json:"reply,omitempty"`
-	Error string `json:"error,omitempty"`
-	Image string `json:"image,omitempty"` // data URL for screenshot/image
+	Type      string `json:"type,omitempty"` // "session_rotated"
+	Reply     string `json:"reply,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Image     string `json:"image,omitempty"` // data URL for screenshot/image
+	SessionID string `json:"session_id,omitempty"`
+	Title     string `json:"title,omitempty"`
 }
 
 func (c *Channel) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -148,6 +162,45 @@ func (c *Channel) handleWS(w http.ResponseWriter, r *http.Request) {
 			c.mu.Unlock()
 		}
 
+		// Handle command messages.
+		if incoming.Type == "command" {
+			switch incoming.Command {
+			case "new":
+				if c.cfg.OnNewSession != nil {
+					newSessionID, err := c.cfg.OnNewSession(ctx, sessionID)
+					if err != nil {
+						c.sendError(ctx, conn, err.Error())
+						continue
+					}
+					// Rotate to the new session.
+					c.mu.Lock()
+					delete(c.conns, sessionID)
+					sessionID = newSessionID
+					c.conns[sessionID] = conn
+					c.mu.Unlock()
+				} else {
+					c.sendError(ctx, conn, "new session not supported")
+				}
+			case "title":
+				if c.cfg.OnRenameSession != nil {
+					if incoming.Text == "" {
+						c.sendError(ctx, conn, "title text required")
+						continue
+					}
+					err := c.cfg.OnRenameSession(ctx, sessionID, incoming.Text)
+					if err != nil {
+						c.sendError(ctx, conn, err.Error())
+					}
+				} else {
+					c.sendError(ctx, conn, "rename session not supported")
+				}
+			default:
+				c.sendError(ctx, conn, "unknown command: "+incoming.Command)
+			}
+			continue
+		}
+
+		// Default to "message" type for backward compatibility.
 		reply, err := c.cfg.OnMessage(ctx, sessionID, incoming.Message)
 		if err != nil {
 			c.sendError(ctx, conn, err.Error())
@@ -161,6 +214,25 @@ func (c *Channel) handleWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// SendSessionRotated sends a session rotation notification to a specific connection.
+// This is used when the session ID changes (e.g., via /new command).
+func (c *Channel) SendSessionRotated(ctx context.Context, sessionID, newSessionID, title string) error {
+	c.mu.RLock()
+	conn, ok := c.conns[sessionID]
+	c.mu.RUnlock()
+	if !ok {
+		return nil // Client disconnected, silently skip.
+	}
+
+	msg := wsMessage{
+		Type:      "session_rotated",
+		SessionID: newSessionID,
+		Title:     title,
+	}
+	data, _ := json.Marshal(msg)
+	return conn.Write(ctx, websocket.MessageText, data)
 }
 
 func (c *Channel) sendError(ctx context.Context, conn *websocket.Conn, msg string) {
