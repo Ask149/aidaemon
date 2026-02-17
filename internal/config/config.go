@@ -67,6 +67,11 @@ type Config struct {
 
 	// HeartbeatInterval in minutes. 0 = disabled. Default: 0.
 	HeartbeatInterval int `json:"heartbeat_interval"`
+
+	// TokenLimit is the model's context window size in tokens.
+	// Used by session manager to trigger proactive rotation at 80%.
+	// Default: 128000.
+	TokenLimit int `json:"token_limit"`
 }
 
 // ToolPermissionRule mirrors permissions.Rule for JSON config.
@@ -96,6 +101,7 @@ func DefaultConfig() Config {
 		SystemPrompt:            "You are a helpful personal assistant. Be concise and direct.",
 		Port:                    8420,
 		LogLevel:                "info",
+		TokenLimit:              128000,
 	}
 }
 

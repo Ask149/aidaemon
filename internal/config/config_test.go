@@ -106,3 +106,11 @@ func TestHeartbeatDuration(t *testing.T) {
 		})
 	}
 }
+
+func TestTokenLimit_Default(t *testing.T) {
+	cfg := DefaultConfig()
+	want := 128000
+	if cfg.TokenLimit != want {
+		t.Errorf("expected default TokenLimit=%d, got %d", want, cfg.TokenLimit)
+	}
+}
