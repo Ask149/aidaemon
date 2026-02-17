@@ -71,6 +71,21 @@ func (c *Channel) Send(ctx context.Context, sessionID string, text string) error
 	return conn.Write(ctx, websocket.MessageText, data)
 }
 
+// SendImage delivers an image to a connected WebSocket client as a data URL.
+// The image is sent as a separate JSON message with the "image" field.
+func (c *Channel) SendImage(ctx context.Context, sessionID string, dataURL string) error {
+	c.mu.RLock()
+	conn, ok := c.conns[sessionID]
+	c.mu.RUnlock()
+	if !ok {
+		return nil // Client disconnected, silently skip.
+	}
+
+	msg := wsMessage{Image: dataURL}
+	data, _ := json.Marshal(msg)
+	return conn.Write(ctx, websocket.MessageText, data)
+}
+
 type wsIncoming struct {
 	Message   string `json:"message"`
 	SessionID string `json:"session_id,omitempty"`
@@ -79,6 +94,7 @@ type wsIncoming struct {
 type wsMessage struct {
 	Reply string `json:"reply,omitempty"`
 	Error string `json:"error,omitempty"`
+	Image string `json:"image,omitempty"` // data URL for screenshot/image
 }
 
 func (c *Channel) handleWS(w http.ResponseWriter, r *http.Request) {

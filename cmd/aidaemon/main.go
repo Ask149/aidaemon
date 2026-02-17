@@ -27,6 +27,7 @@ import (
 	"github.com/Ask149/aidaemon/internal/engine"
 	"github.com/Ask149/aidaemon/internal/heartbeat"
 	"github.com/Ask149/aidaemon/internal/httpapi"
+	"github.com/Ask149/aidaemon/internal/imageutil"
 	"github.com/Ask149/aidaemon/internal/mcp"
 	"github.com/Ask149/aidaemon/internal/permissions"
 	"github.com/Ask149/aidaemon/internal/provider"
@@ -177,9 +178,10 @@ func run() error {
 	// 6. Start services.
 	log.Println("[daemon] starting...")
 
-	// 6a. WebSocket channel — delegates to engine.
-	wsEngine := &engine.Engine{Provider: prov, Registry: registry}
-	wsCh := wschannel.New(wschannel.Config{
+	// 6a. WebSocket channel — delegates to engine with image support.
+	// Declare wsCh first so the OnImage closure can reference it.
+	var wsCh *wschannel.Channel
+	wsCh = wschannel.New(wschannel.Config{
 		OnMessage: func(ctx context.Context, sessionID, text string) (string, error) {
 			if err := st.AddMessage(sessionID, "user", text); err != nil {
 				return "", err
@@ -197,7 +199,24 @@ func run() error {
 				messages = append(messages, provider.Message{Role: m.Role, Content: m.Content})
 			}
 
-			result, err := wsEngine.Run(ctx, messages, engine.RunOptions{Model: cfg.ChatModel, MaxIterations: 25})
+			// Create a per-call engine with ImageAwareExecutor so
+			// screenshots are delivered to the correct WS session.
+			eng := &engine.Engine{
+				Provider: prov,
+				Registry: registry,
+				Executor: &engine.ImageAwareExecutor{
+					Registry: registry,
+					OnImage: func(ctx context.Context, toolName string, images []imageutil.Image) {
+						for _, img := range images {
+							if err := wsCh.SendImage(ctx, sessionID, imageutil.DataURL(img)); err != nil {
+								log.Printf("[wschannel] send image error: %v", err)
+							}
+						}
+					},
+				},
+			}
+
+			result, err := eng.Run(ctx, messages, engine.RunOptions{Model: cfg.ChatModel, MaxIterations: 25})
 			if err != nil {
 				// Return partial result if available (e.g., max iterations reached).
 				if result != nil && result.Content != "" {

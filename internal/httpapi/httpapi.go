@@ -7,8 +7,10 @@
 //	POST /reset         — clear a chat session
 //	POST /tool          — execute a single tool directly
 //	GET  /health        — health check
+//	GET  /ws            — WebSocket upgrade for chat
+//	GET  /              — embedded chat SPA (static files)
 //
-// All endpoints except /health require a Bearer token.
+// All endpoints except /health, /ws, and static files require a Bearer token.
 package httpapi
 
 import (
@@ -25,6 +27,7 @@ import (
 	"github.com/Ask149/aidaemon/internal/store"
 	"github.com/Ask149/aidaemon/internal/tools"
 	"github.com/Ask149/aidaemon/internal/workspace"
+	"github.com/Ask149/aidaemon/web"
 )
 
 // Config holds the HTTP API configuration.
@@ -68,6 +71,9 @@ func New(cfg Config) *API {
 	if cfg.WSHandler != nil {
 		mux.Handle("/ws", cfg.WSHandler)
 	}
+
+	// Embedded chat SPA — serves index.html, style.css, app.js.
+	mux.Handle("/", http.FileServer(http.FS(web.FS)))
 
 	api.server = &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),

@@ -255,3 +255,67 @@ func TestWebSocketChannel_OnMessageError(t *testing.T) {
 		t.Errorf("error = %q, want %q", msg.Error, "something broke")
 	}
 }
+
+func TestWebSocketChannel_SendImage(t *testing.T) {
+	// Block OnMessage so we can call SendImage from the test goroutine.
+	onMsgCalled := make(chan string, 1)
+	ch := New(Config{
+		OnMessage: func(ctx context.Context, sessionID, text string) (string, error) {
+			onMsgCalled <- sessionID
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+	})
+
+	server := httptest.NewServer(ch.Handler())
+	defer server.Close()
+
+	conn, ctx, cancel := dialTest(t, server)
+	defer cancel()
+	defer conn.CloseNow()
+
+	// Send a message to trigger OnMessage and learn the session ID.
+	err := conn.Write(ctx, websocket.MessageText, []byte(`{"message":"hi"}`))
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var sid string
+	select {
+	case sid = <-onMsgCalled:
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for OnMessage")
+	}
+
+	// Use SendImage to push an image message.
+	dataURL := "data:image/png;base64,iVBOR"
+	if err := ch.SendImage(ctx, sid, dataURL); err != nil {
+		t.Fatalf("SendImage: %v", err)
+	}
+
+	// Read the image message.
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	var msg wsMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if msg.Image != dataURL {
+		t.Errorf("image = %q, want %q", msg.Image, dataURL)
+	}
+	if msg.Reply != "" {
+		t.Errorf("reply should be empty, got %q", msg.Reply)
+	}
+}
+
+func TestWebSocketChannel_SendImageDisconnected(t *testing.T) {
+	ch := New(Config{})
+	// Sending an image to an unknown session should not error.
+	err := ch.SendImage(context.Background(), "no-such-session", "data:image/png;base64,AA")
+	if err != nil {
+		t.Errorf("SendImage to disconnected session: %v", err)
+	}
+}
