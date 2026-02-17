@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/Ask149/aidaemon/internal/provider"
@@ -146,10 +147,11 @@ func (d *DummyTool) Execute(ctx context.Context, args map[string]interface{}) (s
 // MemoryStore is an in-memory implementation of the store for testing.
 // It stores messages in a map keyed by chat ID.
 type MemoryStore struct {
-	messages map[string][]store.MessageWithID
-	sessions []store.Session
-	limit    int
-	nextID   int64
+	messages   map[string][]store.MessageWithID
+	sessionsMu sync.RWMutex // Protects sessions slice
+	sessions   []store.Session
+	limit      int
+	nextID     int64
 }
 
 // NewMemoryStore creates a new in-memory store.
@@ -266,29 +268,39 @@ func (m *MemoryStore) ListSessions() ([]store.SessionInfo, error) {
 }
 
 func (m *MemoryStore) CreateSession(session store.Session) error {
+	m.sessionsMu.Lock()
+	defer m.sessionsMu.Unlock()
 	m.sessions = append(m.sessions, session)
 	return nil
 }
 
 func (m *MemoryStore) GetSession(id string) (*store.Session, error) {
+	m.sessionsMu.RLock()
+	defer m.sessionsMu.RUnlock()
 	for i := range m.sessions {
 		if m.sessions[i].ID == id {
-			return &m.sessions[i], nil
+			sess := m.sessions[i] // Copy to avoid race
+			return &sess, nil
 		}
 	}
 	return nil, nil
 }
 
 func (m *MemoryStore) ActiveSession(channel string) (*store.Session, error) {
+	m.sessionsMu.RLock()
+	defer m.sessionsMu.RUnlock()
 	for i := range m.sessions {
 		if m.sessions[i].Channel == channel && m.sessions[i].Status == "active" {
-			return &m.sessions[i], nil
+			sess := m.sessions[i] // Copy to avoid race
+			return &sess, nil
 		}
 	}
 	return nil, nil
 }
 
 func (m *MemoryStore) UpdateSession(session store.Session) error {
+	m.sessionsMu.Lock()
+	defer m.sessionsMu.Unlock()
 	for i := range m.sessions {
 		if m.sessions[i].ID == session.ID {
 			m.sessions[i] = session
@@ -299,10 +311,12 @@ func (m *MemoryStore) UpdateSession(session store.Session) error {
 }
 
 func (m *MemoryStore) ListAllSessions(channel string) ([]store.Session, error) {
+	m.sessionsMu.RLock()
+	defer m.sessionsMu.RUnlock()
 	var result []store.Session
 	for _, sess := range m.sessions {
 		if channel == "" || sess.Channel == channel {
-			result = append(result, sess)
+			result = append(result, sess) // Append copy
 		}
 	}
 	// Sort by last_activity DESC.
