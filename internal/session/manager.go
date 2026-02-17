@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Ask149/aidaemon/internal/engine"
@@ -44,13 +45,15 @@ type HandleOptions struct {
 
 // Manager orchestrates session lifecycle.
 type Manager struct {
-	store      store.Conversation
-	engine     *engine.Engine
-	model      string
-	tokenLimit int
-	threshold  float64
-	wsDir      string
-	sysPrompt  func() string
+	store             store.Conversation
+	engine            *engine.Engine
+	model             string
+	tokenLimit        int
+	threshold         float64
+	wsDir             string
+	sysPrompt         func() string
+	lastDailyRotation time.Time
+	rotationMu        sync.Mutex
 }
 
 // NewManager creates a session Manager with the given config.
@@ -488,19 +491,14 @@ func (m *Manager) StartDailyRotation(ctx context.Context) func() {
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 
-		var lastRotationDate string
-
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case now := <-ticker.C:
-				today := now.Format("2006-01-02")
 				hour := now.Hour()
-
-				// Fire at 4AM, once per day.
-				if hour == 4 && lastRotationDate != today {
-					lastRotationDate = today
+				// Fire at 4AM.
+				if hour == 4 {
 					m.rotateAllActive(ctx)
 				}
 			}
@@ -512,18 +510,37 @@ func (m *Manager) StartDailyRotation(ctx context.Context) func() {
 
 // rotateAllActive rotates all active sessions across all channels.
 func (m *Manager) rotateAllActive(ctx context.Context) {
+	// Prevent duplicate rotations within the same hour.
+	m.rotationMu.Lock()
+	now := time.Now()
+	if now.Sub(m.lastDailyRotation) < 1*time.Hour {
+		m.rotationMu.Unlock()
+		return // Already rotated recently
+	}
+	m.lastDailyRotation = now
+	m.rotationMu.Unlock()
+
 	sessions, err := m.store.ListAllSessions("")
 	if err != nil {
 		log.Printf("[session] daily rotation list error: %v", err)
 		return
 	}
 
+	today := time.Now().Truncate(24 * time.Hour)
+
 	for _, sess := range sessions {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		if sess.Status != "active" {
 			continue
 		}
 		// Only rotate sessions that started before today.
-		if sess.CreatedAt.Day() == time.Now().Day() {
+		sessionDate := sess.CreatedAt.Truncate(24 * time.Hour)
+		if sessionDate.Equal(today) {
 			continue
 		}
 		log.Printf("[session] daily rotation for channel %s (session %s)", sess.Channel, sess.ID)
