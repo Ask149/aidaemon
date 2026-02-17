@@ -11,7 +11,7 @@ import (
 func TestLoadWorkspace_Empty(t *testing.T) {
 	dir := t.TempDir()
 
-	w := Load(dir)
+	w := Load(dir, "")
 
 	prompt := w.SystemPrompt()
 	if prompt == "" {
@@ -26,7 +26,7 @@ func TestLoadWorkspace_WithSoul(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, FileSoul, "I am a pirate assistant. Arrr!")
 
-	w := Load(dir)
+	w := Load(dir, "")
 
 	prompt := w.SystemPrompt()
 	if !strings.Contains(prompt, "pirate assistant") {
@@ -44,7 +44,7 @@ func TestLoadWorkspace_AllFiles(t *testing.T) {
 	writeTestFile(t, dir, FileMemory, "Remember: user is Ashish.")
 	writeTestFile(t, dir, FileTools, "mcp server available on port 8080.")
 
-	w := Load(dir)
+	w := Load(dir, "")
 	prompt := w.SystemPrompt()
 
 	// Verify all sections present.
@@ -97,7 +97,7 @@ func TestLoadWorkspace_TokenBudget(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeTestFile(t, dir, FileMemory, strings.Repeat("x", tt.size))
-			w := Load(dir)
+			w := Load(dir, "")
 			if w.OverTokenBudget != tt.wantOver {
 				t.Errorf("size=%d: got OverTokenBudget=%v, want %v", tt.size, w.OverTokenBudget, tt.wantOver)
 			}
@@ -108,7 +108,7 @@ func TestLoadWorkspace_TokenBudget(t *testing.T) {
 func TestLoadWorkspace_MissingDir(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "nonexistent", "path")
 
-	w := Load(dir)
+	w := Load(dir, "")
 
 	// Should return defaults without panicking.
 	if w == nil {
@@ -152,7 +152,7 @@ func TestLoad_IncludesRecentDailyLogs(t *testing.T) {
 		os.WriteFile(filepath.Join(memDir, name), []byte("# Log "+name), 0644)
 	}
 
-	ws := Load(dir)
+	ws := Load(dir, "")
 
 	// Verify exactly 3 days are loaded (today, yesterday, 2 days ago).
 	if len(ws.DailyLogs) != 3 {
@@ -223,6 +223,30 @@ func TestLoadSkills_SkipsEmptyFiles(t *testing.T) {
 	}
 	if skills[0].Name != "real" {
 		t.Errorf("expected 'real', got %q", skills[0].Name)
+	}
+}
+
+func TestLoad_WithSkills(t *testing.T) {
+	dir := t.TempDir()
+	skillsDir := t.TempDir()
+	writeTestFile(t, dir, FileSoul, "I am the soul.")
+	writeTestFile(t, skillsDir, "coding.md", "Always write tests first.")
+
+	w := Load(dir, skillsDir)
+
+	if len(w.Skills) != 1 {
+		t.Fatalf("expected 1 skill, got %d", len(w.Skills))
+	}
+	if w.Skills[0].Name != "coding" {
+		t.Errorf("expected skill name 'coding', got %q", w.Skills[0].Name)
+	}
+}
+
+func TestLoad_NoSkillsDir(t *testing.T) {
+	dir := t.TempDir()
+	w := Load(dir, "")
+	if len(w.Skills) != 0 {
+		t.Errorf("expected 0 skills with empty skillsDir, got %d", len(w.Skills))
 	}
 }
 

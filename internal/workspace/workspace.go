@@ -79,19 +79,22 @@ type Workspace struct {
 
 // Load reads all workspace files from dir and returns a Workspace.
 // Missing files are silently skipped (empty string). A non-existent
-// directory is treated as an empty workspace.
-func Load(dir string) *Workspace {
+// directory is treated as an empty workspace. skillsDir is the path
+// to the skills directory; pass "" to skip loading skills.
+func Load(dir, skillsDir string) *Workspace {
 	w := &Workspace{Dir: dir}
 
 	w.Soul = readFile(dir, FileSoul)
 	w.User = readFile(dir, FileUser)
 	w.Memory = readFile(dir, FileMemory)
 	w.Tools = readFile(dir, FileTools)
-
-	// Load recent daily logs (last 3 days).
+	w.Skills = loadSkills(skillsDir)
 	w.DailyLogs = loadDailyLogs(dir, 3)
 
 	total := len(w.Soul) + len(w.User) + len(w.Memory) + len(w.Tools)
+	for _, s := range w.Skills {
+		total += len(s.Content)
+	}
 	for _, dl := range w.DailyLogs {
 		total += len(dl.Content)
 	}
