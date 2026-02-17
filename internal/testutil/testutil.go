@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Ask149/aidaemon/internal/provider"
 	"github.com/Ask149/aidaemon/internal/store"
@@ -325,6 +326,17 @@ func (m *MemoryStore) ListAllSessions(channel string) ([]store.Session, error) {
 	})
 	return result, nil
 }
+
+// --- Cron stubs (satisfy Conversation interface; not exercised by session tests) ---
+
+func (m *MemoryStore) CreateCronJob(_ store.CronJob) error              { return nil }
+func (m *MemoryStore) GetCronJob(_ string) (*store.CronJob, error)      { return nil, nil }
+func (m *MemoryStore) ListCronJobs() ([]store.CronJob, error)           { return nil, nil }
+func (m *MemoryStore) UpdateCronJob(_ store.CronJob) error              { return nil }
+func (m *MemoryStore) DeleteCronJob(_ string) error                     { return nil }
+func (m *MemoryStore) DueCronJobs(_ time.Time) ([]store.CronJob, error) { return nil, nil }
+func (m *MemoryStore) CreateCronRun(_ store.CronRun) error              { return nil }
+func (m *MemoryStore) PruneCronRuns(_ string, _ int) error              { return nil }
 
 // TempDir creates a temporary directory for testing file operations.
 // Returns the path. Cleaned up automatically when the test finishes.

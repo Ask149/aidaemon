@@ -24,12 +24,14 @@ import (
 	"github.com/Ask149/aidaemon/internal/auth"
 	"github.com/Ask149/aidaemon/internal/channel"
 	"github.com/Ask149/aidaemon/internal/config"
+	"github.com/Ask149/aidaemon/internal/cron"
 	"github.com/Ask149/aidaemon/internal/engine"
 	"github.com/Ask149/aidaemon/internal/heartbeat"
 	"github.com/Ask149/aidaemon/internal/httpapi"
 	"github.com/Ask149/aidaemon/internal/imageutil"
 	"github.com/Ask149/aidaemon/internal/mcp"
 	"github.com/Ask149/aidaemon/internal/permissions"
+	"github.com/Ask149/aidaemon/internal/provider"
 	"github.com/Ask149/aidaemon/internal/provider/copilot"
 	"github.com/Ask149/aidaemon/internal/session"
 	"github.com/Ask149/aidaemon/internal/store"
@@ -194,6 +196,13 @@ func run() error {
 	st.MigrateExistingSessions()
 	log.Printf("[daemon] existing sessions migrated")
 
+	// 5g. Register cron management tool (needs store, registered after setupTools).
+	registry.Register(&builtin.ManageCronTool{
+		Store:       st,
+		ChannelType: "telegram",
+		ChannelMeta: fmt.Sprintf(`{"chat_id":%d}`, cfg.TelegramUserID),
+	})
+
 	// 6. Start services.
 	log.Println("[daemon] starting...")
 
@@ -300,10 +309,61 @@ func run() error {
 		log.Printf("[daemon] heartbeat started (interval=%s)", hbDur)
 	}
 
+	// 8. Cron scheduler.
+	var cronSender cron.CronSender
+	if tbot != nil {
+		cronSender = &cron.TelegramSender{
+			SendFn: func(ctx context.Context, chatID int64, text string) error {
+				sid := channel.SessionID("telegram", strconv.FormatInt(chatID, 10))
+				return tbot.Send(ctx, sid, text)
+			},
+		}
+	}
+
+	cronEngine := &engine.Engine{
+		Provider: prov,
+		Registry: registry,
+	}
+
+	cronExec := &cron.Executor{
+		Sender: cronSender,
+		RunMessage: func(ctx context.Context, prompt string) (string, error) {
+			sysPrompt := workspace.Load(wsDir, skillsDir).SystemPrompt()
+			messages := []provider.Message{
+				{Role: "system", Content: sysPrompt},
+				{Role: "user", Content: prompt},
+			}
+			result, err := cronEngine.Run(ctx, messages, engine.RunOptions{
+				Model:         cfg.ChatModel,
+				MaxIterations: 25,
+			})
+			if err != nil {
+				if result != nil && result.Content != "" {
+					return result.Content, nil
+				}
+				return "", err
+			}
+			return result.Content, nil
+		},
+		RunTool: func(ctx context.Context, toolName, argsJSON string) (string, error) {
+			return registry.Execute(ctx, toolName, argsJSON)
+		},
+	}
+
+	cronScheduler := cron.NewScheduler(cron.SchedulerConfig{
+		Store:    st,
+		Executor: cronExec,
+	})
+	cronScheduler.Start(ctx)
+	log.Printf("[daemon] cron scheduler started")
+
 	// Block until shutdown signal.
 	<-ctx.Done()
 
 	log.Println("[daemon] shutting down...")
+
+	// Wait for in-flight cron jobs to finish.
+	cronScheduler.Wait()
 
 	// Stop MCP servers.
 	if mcpMgr != nil {
