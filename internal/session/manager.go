@@ -94,7 +94,11 @@ func (m *Manager) HandleMessage(ctx context.Context, channelID, text string, opt
 		if err != nil {
 			log.Printf("[session] rotation failed: %v — continuing with current session", err)
 		} else {
-			sess, _ = m.store.GetSession(newID)
+			newSess, getErr := m.store.GetSession(newID)
+			if getErr != nil || newSess == nil {
+				return nil, fmt.Errorf("get rotated session %s: %w", newID, getErr)
+			}
+			sess = newSess
 		}
 	}
 
