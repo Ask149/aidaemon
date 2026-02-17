@@ -173,6 +173,59 @@ func TestLoad_IncludesRecentDailyLogs(t *testing.T) {
 	}
 }
 
+func TestLoadSkills_Empty(t *testing.T) {
+	dir := t.TempDir()
+	skillsDir := filepath.Join(dir, "skills")
+	// No skills dir created — should return nil.
+	skills := loadSkills(skillsDir)
+	if skills != nil {
+		t.Errorf("expected nil skills for missing dir, got %v", skills)
+	}
+}
+
+func TestLoadSkills_LoadsAndSorts(t *testing.T) {
+	skillsDir := t.TempDir()
+	writeTestFile(t, skillsDir, "zebra.md", "Zebra skill content")
+	writeTestFile(t, skillsDir, "alpha.md", "Alpha skill content")
+	writeTestFile(t, skillsDir, "middle.md", "Middle skill content")
+	// Non-md file should be ignored.
+	writeTestFile(t, skillsDir, "ignore.txt", "Not a skill")
+
+	skills := loadSkills(skillsDir)
+
+	if len(skills) != 3 {
+		t.Fatalf("expected 3 skills, got %d", len(skills))
+	}
+	// Alphabetical order.
+	if skills[0].Name != "alpha" {
+		t.Errorf("expected first skill 'alpha', got %q", skills[0].Name)
+	}
+	if skills[1].Name != "middle" {
+		t.Errorf("expected second skill 'middle', got %q", skills[1].Name)
+	}
+	if skills[2].Name != "zebra" {
+		t.Errorf("expected third skill 'zebra', got %q", skills[2].Name)
+	}
+	if skills[0].Content != "Alpha skill content" {
+		t.Errorf("expected alpha content, got %q", skills[0].Content)
+	}
+}
+
+func TestLoadSkills_SkipsEmptyFiles(t *testing.T) {
+	skillsDir := t.TempDir()
+	writeTestFile(t, skillsDir, "real.md", "Real content")
+	writeTestFile(t, skillsDir, "empty.md", "")
+	writeTestFile(t, skillsDir, "whitespace.md", "   \n  \n  ")
+
+	skills := loadSkills(skillsDir)
+	if len(skills) != 1 {
+		t.Fatalf("expected 1 skill (empty/whitespace skipped), got %d", len(skills))
+	}
+	if skills[0].Name != "real" {
+		t.Errorf("expected 'real', got %q", skills[0].Name)
+	}
+}
+
 // writeTestFile is a test helper that writes content to a file in dir.
 func writeTestFile(t *testing.T, dir, name, content string) {
 	t.Helper()

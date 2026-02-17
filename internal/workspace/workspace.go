@@ -15,6 +15,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -42,6 +43,12 @@ type DailyLog struct {
 	Content string
 }
 
+// Skill holds a loaded skill file.
+type Skill struct {
+	Name    string // filename without .md extension
+	Content string
+}
+
 // Workspace holds the loaded contents of a workspace directory.
 type Workspace struct {
 	// Dir is the workspace directory path.
@@ -61,6 +68,9 @@ type Workspace struct {
 
 	// DailyLogs contains recent daily memory log contents (last 3 days).
 	DailyLogs []DailyLog
+
+	// Skills contains loaded skill files, sorted alphabetically.
+	Skills []Skill
 
 	// OverTokenBudget is true when the total workspace content exceeds
 	// the character budget (~2K tokens).
@@ -173,4 +183,36 @@ func loadDailyLogs(dir string, days int) []DailyLog {
 		}
 	}
 	return logs
+}
+
+// loadSkills reads *.md files from skillsDir, sorted alphabetically.
+// Returns nil if the directory doesn't exist or is empty.
+func loadSkills(skillsDir string) []Skill {
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		return nil
+	}
+
+	var skills []Skill
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		content := readFile(skillsDir, name)
+		if content == "" {
+			continue
+		}
+		skills = append(skills, Skill{
+			Name:    strings.TrimSuffix(name, ".md"),
+			Content: content,
+		})
+	}
+	sort.Slice(skills, func(i, j int) bool {
+		return skills[i].Name < skills[j].Name
+	})
+	return skills
 }
