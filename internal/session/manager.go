@@ -12,6 +12,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Ask149/aidaemon/internal/engine"
@@ -191,9 +194,13 @@ func (m *Manager) RenameSession(sessionID, title string) error {
 	return m.store.UpdateSession(*sess)
 }
 
-// RotateSession closes the active session and creates a new one.
-// Returns the new session ID. This is a basic implementation that
-// will be enhanced with memory flush and summarization in Task 5.
+// RotateSession closes the active session for a channel and creates a new one.
+// The full rotation flow:
+// 1. Memory flush turn — silent Engine.Run asking agent to save context
+// 2. Summarize the old session
+// 3. Write daily log to workspace/memory/YYYY-MM-DD.md
+// 4. Close old session with summary
+// 5. Create new session with carry-forward summary message
 func (m *Manager) RotateSession(ctx context.Context, channelID string) (string, error) {
 	old, err := m.store.ActiveSession(channelID)
 	if err != nil {
@@ -208,18 +215,35 @@ func (m *Manager) RotateSession(ctx context.Context, channelID string) (string, 
 		return sess.ID, nil
 	}
 
-	// Close old session.
+	// 1. Memory flush — run a silent turn asking agent to save context.
+	m.memoryFlush(ctx, old)
+
+	// 2. Summarize the conversation.
+	summary := m.summarizeSession(ctx, old.ID)
+
+	// 3. Write daily log.
+	if m.wsDir != "" && summary != "" {
+		m.writeDailyLog(old, summary)
+	}
+
+	// 4. Close old session.
 	now := time.Now()
 	old.Status = "closed"
 	old.ClosedAt = &now
+	old.Summary = summary
 	if err := m.store.UpdateSession(*old); err != nil {
 		return "", fmt.Errorf("close session: %w", err)
 	}
 
-	// Create new session.
+	// 5. Create new session with carry-forward.
 	newSess, err := m.createSession(channelID)
 	if err != nil {
 		return "", err
+	}
+
+	if summary != "" {
+		carryForward := "[Carried forward from previous session]\n\n" + summary
+		m.store.AddMessage(newSess.ID, "assistant", carryForward)
 	}
 
 	log.Printf("[session] rotated %s → %s for channel %s", old.ID, newSess.ID, channelID)
@@ -274,4 +298,117 @@ func generateSessionID() string {
 	b := make([]byte, 5)
 	rand.Read(b)
 	return "s_" + hex.EncodeToString(b)
+}
+
+// memoryFlush runs a silent engine turn asking the agent to persist
+// important context to MEMORY.md before session rotation.
+func (m *Manager) memoryFlush(ctx context.Context, sess *store.Session) {
+	history, err := m.store.GetHistory(sess.ID)
+	if err != nil || len(history) < 2 {
+		return // nothing to flush
+	}
+
+	sysPrompt := m.sysPrompt()
+	messages := make([]provider.Message, 0, len(history)+2)
+	if sysPrompt != "" {
+		messages = append(messages, provider.Message{Role: "system", Content: sysPrompt})
+	}
+	for _, msg := range history {
+		messages = append(messages, provider.Message{Role: msg.Role, Content: msg.Content})
+	}
+
+	flushPrompt := "This session is being archived. Save any important context, decisions, facts, " +
+		"or action items to MEMORY.md using the write_workspace tool. Be thorough — this is your " +
+		"last chance to persist information from this conversation. Do NOT reply with a user-facing " +
+		"message — only use tools."
+	messages = append(messages, provider.Message{Role: "user", Content: flushPrompt})
+
+	// Run with limited iterations — just enough for tool calls.
+	_, err = m.engine.Run(ctx, messages, engine.RunOptions{
+		Model:         m.model,
+		MaxIterations: 5,
+	})
+	if err != nil {
+		log.Printf("[session] memory flush failed for %s: %v", sess.ID, err)
+	}
+}
+
+// summarizeSession calls a cheap model to summarize a session's conversation.
+func (m *Manager) summarizeSession(ctx context.Context, sessionID string) string {
+	history, err := m.store.GetHistory(sessionID)
+	if err != nil || len(history) == 0 {
+		return ""
+	}
+
+	// Build transcript (truncate individual messages).
+	var transcript strings.Builder
+	for _, msg := range history {
+		transcript.WriteString(msg.Role)
+		transcript.WriteString(": ")
+		content := msg.Content
+		if len(content) > 300 {
+			content = content[:300] + "..."
+		}
+		transcript.WriteString(content)
+		transcript.WriteString("\n")
+	}
+
+	req := provider.ChatRequest{
+		Model: "gpt-4o-mini",
+		Messages: []provider.Message{
+			{
+				Role:    "system",
+				Content: "Summarize this conversation in 2-3 concise paragraphs. Preserve key facts: decisions, file paths, action items, and outcomes.",
+			},
+			{
+				Role:    "user",
+				Content: transcript.String(),
+			},
+		},
+	}
+
+	resp, err := m.engine.Provider.Chat(ctx, req)
+	if err != nil || resp.Content == "" {
+		log.Printf("[session] summarize failed for %s: %v", sessionID, err)
+		return ""
+	}
+	return resp.Content
+}
+
+// writeDailyLog appends a session summary to workspace/memory/YYYY-MM-DD.md.
+func (m *Manager) writeDailyLog(sess *store.Session, summary string) {
+	memDir := filepath.Join(m.wsDir, "memory")
+	if err := os.MkdirAll(memDir, 0700); err != nil {
+		log.Printf("[session] create memory dir: %v", err)
+		return
+	}
+
+	dateStr := time.Now().Format("2006-01-02")
+	logPath := filepath.Join(memDir, dateStr+".md")
+
+	title := sess.Title
+	if title == "" {
+		title = "Untitled Session"
+	}
+
+	entry := fmt.Sprintf("\n## Session: %s\n**%s → %s**\n\n%s\n",
+		title,
+		sess.CreatedAt.Format("15:04"),
+		time.Now().Format("15:04"),
+		summary,
+	)
+
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Printf("[session] write daily log: %v", err)
+		return
+	}
+	defer f.Close()
+
+	// Write header if file is new.
+	stat, _ := f.Stat()
+	if stat.Size() == 0 {
+		fmt.Fprintf(f, "# %s\n", dateStr)
+	}
+	fmt.Fprint(f, entry)
 }
