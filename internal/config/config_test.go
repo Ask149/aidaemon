@@ -127,3 +127,46 @@ func TestTokenLimit_ZeroDefaultsTo128k(t *testing.T) {
 		t.Errorf("expected TokenLimit=128000 after validate(), got %d", cfg.TokenLimit)
 	}
 }
+
+func TestDefaultProvider(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Provider != "copilot" {
+		t.Errorf("expected default provider %q, got %q", "copilot", cfg.Provider)
+	}
+}
+
+func TestValidate_OpenAI_RequiresBaseURL(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Provider = "openai"
+	cfg.ProviderConfig.APIKey = "sk-test"
+	if err := cfg.validate(); err == nil {
+		t.Error("expected error for openai provider without base_url")
+	}
+}
+
+func TestValidate_OpenAI_RequiresAPIKey(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Provider = "openai"
+	cfg.ProviderConfig.BaseURL = "https://api.openai.com/v1"
+	if err := cfg.validate(); err == nil {
+		t.Error("expected error for openai provider without api_key")
+	}
+}
+
+func TestValidate_OpenAI_Valid(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Provider = "openai"
+	cfg.ProviderConfig.BaseURL = "https://api.openai.com/v1"
+	cfg.ProviderConfig.APIKey = "sk-test"
+	if err := cfg.validate(); err != nil {
+		t.Errorf("expected no error, got: %v", err)
+	}
+}
+
+func TestValidate_UnknownProvider(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Provider = "anthropic"
+	if err := cfg.validate(); err == nil {
+		t.Error("expected error for unknown provider")
+	}
+}

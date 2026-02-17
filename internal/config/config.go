@@ -72,6 +72,13 @@ type Config struct {
 	// Used by session manager to trigger proactive rotation at 80%.
 	// Default: 128000.
 	TokenLimit int `json:"token_limit"`
+
+	// Provider to use: "copilot" (default) or "openai".
+	Provider string `json:"provider"`
+
+	// ProviderConfig holds settings for the OpenAI-compatible provider.
+	// Required when provider is "openai".
+	ProviderConfig ProviderConfigBlock `json:"provider_config,omitempty"`
 }
 
 // ToolPermissionRule mirrors permissions.Rule for JSON config.
@@ -93,6 +100,20 @@ type MCPServerConfig struct {
 	Enabled *bool             `json:"enabled,omitempty"`
 }
 
+// ProviderConfigBlock holds OpenAI-compatible provider settings.
+type ProviderConfigBlock struct {
+	// BaseURL is the API base (e.g., "https://api.openai.com/v1").
+	// /chat/completions is appended automatically.
+	BaseURL string `json:"base_url"`
+
+	// APIKey for authentication.
+	APIKey string `json:"api_key"`
+
+	// AzureAPIVersion triggers Azure mode when non-empty (e.g., "2024-02-01").
+	// Uses "api-key" header instead of "Authorization: Bearer".
+	AzureAPIVersion string `json:"azure_api_version,omitempty"`
+}
+
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
@@ -102,6 +123,7 @@ func DefaultConfig() Config {
 		Port:                    8420,
 		LogLevel:                "info",
 		TokenLimit:              128000,
+		Provider:                "copilot",
 	}
 }
 
@@ -188,6 +210,22 @@ func (c *Config) validate() error {
 	if c.TokenLimit <= 0 {
 		c.TokenLimit = 128000
 	}
+
+	// Provider validation.
+	switch c.Provider {
+	case "copilot", "":
+		c.Provider = "copilot" // normalize empty to default
+	case "openai":
+		if c.ProviderConfig.BaseURL == "" {
+			return fmt.Errorf("provider_config.base_url is required when provider is %q", c.Provider)
+		}
+		if c.ProviderConfig.APIKey == "" {
+			return fmt.Errorf("provider_config.api_key is required when provider is %q", c.Provider)
+		}
+	default:
+		return fmt.Errorf("unknown provider %q (supported: copilot, openai)", c.Provider)
+	}
+
 	return nil
 }
 
