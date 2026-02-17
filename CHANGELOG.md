@@ -7,21 +7,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
-- `/tools` command — lists all tools grouped by source (built-in vs MCP server)
-- `/context` command — detailed context window breakdown (tokens, roles, capacity bar)
-- Rich stats footer on every response: token counts (with K/M formatting), timing, tool usage, LLM call count
-- Proactive token budget management — trims messages before LLM calls to stay within model limits
-- Auto-recovery from token limit errors — emergency summarization with cheap model (up to 3 retries)
-- Tool result truncation — caps individual tool outputs at 30K chars to prevent context blowout
-- Per-tool execution timing and error tracking in `Result`
-- `ModelTokenLimit()` — static token limit map for all supported models
-- Watchdog script (`scripts/watchdog.sh`) — keeps daemon alive via macOS launchd (every 30 min)
+- **Session lifecycle management** — persistent session IDs with auto-generated titles
+- `/new` command (Telegram + WebSocket) — start new session, archives current conversation
+- `/title <text>` command (Telegram + WebSocket) — rename current session
+- Daily 4AM rotation — automatically rotates all active sessions
+- Memory flush before rotation — saves context to `workspace/MEMORY.md`
+- Daily memory logs — last 3 days of `workspace/memory/YYYY-MM-DD.md` loaded into system prompt
+- Session manager — orchestrates session lifecycle, token threshold checking (80%), rotation flow
+- HTTP API session endpoints — GET/POST for sessions, messages, titles
+- Web UI session sidebar — browse sessions, click to switch, view history
+- WebSocket command messages — `/new` and `/title` as command type
+- `session_rotated` WebSocket event — notifies clients when session rotates
+- Token budget includes daily logs — workspace token calculation now accounts for memory logs
+- Race-safe test utilities — MemoryStore now uses mutex protection
 
 ### Changed
-- `/status` now shows model tier (premium/unlimited), context health bar, token limit, and tool count
-- `/help` reorganized into Chat / Monitoring / Tips sections
-- Stats footer upgraded from simple `tokens | model` to full `tokens | timing | tools | LLM calls | model`
-- Max-iteration summary now handles token limit errors with emergency fallback
+- Conversations are now session-based instead of infinite per-channel
+- WebSocket OnMessage routed through SessionManager.HandleMessage
+- Telegram messages routed through SessionManager
+- HTTP API enhanced with SessionManager integration
+- Token limit now configurable via `token_limit` field in config (default: 128000)
+
+### Fixed
+- Off-by-one error in daily log cutoff (was loading 4 days instead of 3)
+- Race conditions in title generation goroutine
+- Date comparison bug in daily rotation (now uses full date, not day-of-month)
+- Context leak in async title generation (now propagates parent context)
 
 ## [0.1.0] — 2026-02-13
 

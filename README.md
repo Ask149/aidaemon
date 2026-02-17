@@ -7,6 +7,9 @@ Chat with GPT-5, Claude Opus 4.6, Gemini 3 Pro, and 10+ other models from your p
 ## Features
 
 - **13+ premium models** — GPT-5, Claude Opus 4.6, Gemini 3 Pro, and more via GitHub Copilot API
+- **Session management** — persistent session IDs with titles, browse/switch via web UI or API
+- **Auto-rotation** — daily 4AM rotation with memory flush and summary
+- **Smart context** — load recent daily memory logs (last 3 days) into system prompt
 - **Streaming responses** — live typing indicators with adaptive debounce
 - **Tool execution** — read/write files, run shell commands, search the web
 - **MCP integration** — 6 servers, 70+ tools (Playwright, Apple apps, Google Calendar, memory, filesystem)
@@ -55,6 +58,7 @@ Create `~/.config/aidaemon/config.json`:
   "telegram_user_id": 123456789,            // from @userinfobot on Telegram
   "chat_model": "claude-sonnet-4.5",        // default model
   "max_conversation_messages": 20,          // context window size
+  "token_limit": 128000,                    // token limit for rotation threshold
   "system_prompt": "You are a helpful personal assistant."
 }
 ```
@@ -97,12 +101,44 @@ The daemon starts, connects to Telegram, and waits for your messages.
 | `/status` | Model, context health, tool count |
 | `/context` | Detailed context window breakdown (tokens, roles, capacity) |
 | `/tools` | List all available tools grouped by source |
+| `/new` | Start new session (archives current conversation) |
+| `/title <text>` | Rename current session |
 | `/reset` | Clear conversation history |
 | `/help` | Show help |
+
+### Web Interface
+
+AIDaemon includes a web UI at `http://localhost:8420` (configurable via `http_port` in config):
+
+- **Session sidebar** — Browse all sessions, click to switch and view history
+- **Live chat** — Real-time WebSocket messaging with the AI
+- **Command support** — Use `/new` and `/title` commands in the web UI
+- **Session rotation** — Automatic notification when session rotates
+
+#### Web Commands
+
+| Command | Description |
+|---------|-------------|
+| `/new` | Start new session via WebSocket |
+| `/title <text>` | Rename current session |
 
 ### HTTP API
 
 When `api_token` is set in config, a REST API is available on port 8420:
+
+REST endpoints for programmatic access:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/sessions` | GET | List all sessions |
+| `/sessions/{id}` | GET | Get session details |
+| `/sessions/{id}/messages` | GET | Get message history for session |
+| `/sessions/{id}/title` | POST | Rename session (body: `{"title": "..."}`) |
+| `/chat` | POST | Send message (existing endpoint) |
+| `/tool` | POST | Execute a tool directly |
+| `/health` | GET | Health check (no auth required) |
+
+All endpoints require `Authorization: Bearer <token>` header (token from config).
 
 ```bash
 # Chat
@@ -120,8 +156,6 @@ curl -X POST http://localhost:8420/tool \
 # Health check (no auth required)
 curl http://localhost:8420/health
 ```
-
-## Built-in Tools
 
 | Tool | Description |
 |------|-------------|
@@ -175,6 +209,7 @@ Configure in `config.json`:
   // Model
   "chat_model": "claude-sonnet-4.5",   // Default LLM model
   "max_conversation_messages": 20,     // Messages before context compaction
+  "token_limit": 128000,               // Token limit for rotation threshold
 
   // System prompt
   "system_prompt": "string",           // Inline prompt (overridden by system_prompt.md file)

@@ -6,22 +6,32 @@ Technical deep-dive into AIDaemon's design, data flows, and implementation decis
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                    Telegram Bot                          │
-│  Long polling · Edit-message streaming · Command routing │
-└──────────────────┬────────────────────────┬──────────────┘
-                   │                        │
-┌──────────────────▼──────────┐  ┌──────────▼──────────────┐
-│        HTTP API             │  │     SQLite Store         │
-│  /chat · /tool · /health    │  │  WAL mode · Auto-trim    │
-└──────────────────┬──────────┘  └─────────────────────────┘
-                   │
+│                 Telegram Bot + WebSocket                 │
+│  Long polling · Progress · Commands · Session sidebar   │
+└──────────────────┬───────────────────────┬───────────────┘
+                   │                       │
+┌──────────────────▼──────────┐  ┌─────────▼─────────────┐
+│        HTTP API             │  │   SQLite Store        │
+│  /chat · /sessions · /tool  │  │  sessions table       │
+└──────────────────┬──────────┘  │  WAL mode · Migrations│
+                   │              └───────────────────────┘
 ┌──────────────────▼──────────────────────────────────────┐
-│                   Core Daemon                           │
+│           Session Manager (551 lines)                    │
+│  Session lifecycle · Token threshold · Auto-rotation     │
+│  Title generation · Memory flush · Daily logs            │
+│  ┌────────────────┐  ┌──────────────┐  ┌─────────────┐ │
+│  │  HandleMessage │  │ RotateSession │  │ DailyRotate │ │
+│  │  (orchestrate) │  │ (5-step flow) │  │ (4AM cron)  │ │
+│  └────────┬───────┘  └──────┬───────┘  └─────────────┘ │
+└───────────┼──────────────────┼──────────────────────────┘
+            │                  │
+┌───────────▼──────────────────▼──────────────────────────┐
+│              Engine (747 lines)                          │
+│  LLM↔tool loop · Token budget · Progress · Summarize    │
 │  ┌────────────┐  ┌──────────────┐  ┌────────────────┐  │
 │  │  Provider   │  │ Tool Registry │  │  Permissions   │  │
 │  │ (Copilot)   │  │ + Audit Log   │  │  Checker       │  │
 │  └──────┬─────┘  └───────┬──────┘  └────────────────┘  │
-│         │                │                              │
 └─────────┼────────────────┼──────────────────────────────┘
           │                │
           │         ┌──────┴──────────────────┐
@@ -93,37 +103,104 @@ type Provider interface {
 - 1-hour model cache with mutex-protected refresh
 - Required headers: `Editor-Version`, `Editor-Plugin-Version`, `Copilot-Integration-Id`
 
-### `internal/tools/`
+### `internal/session/`
 
-Tool framework with OpenAI function calling format.
+Session lifecycle management with persistent IDs, titles, and automatic rotation.
 
-**`tool.go`** — Core interface:
-```go
-type Tool interface {
-    Name() string
-    Description() string
-    Parameters() map[string]interface{}  // JSON Schema
-    Execute(ctx, args map[string]interface{}) (string, error)
-}
+**`manager.go` — Session Manager (551 lines)**
+- Orchestrates session creation, lookup, rotation
+- HandleMessage: routes messages through Engine with per-session history
+- Token threshold checking (80% of limit triggers rotation)
+- RotateSession: 5-step flow (flush → summarize → log → close → create)
+- Auto-title generation: async call to gpt-4o-mini after first exchange
+- Daily rotation goroutine: runs at 4AM, rotates all active sessions
+- Helper methods: getOrCreateSession, estimateTokens, generateSessionID
+
+**Session Flow:**
+```
+User message → HandleMessage
+              ↓
+       getOrCreateSession (SQLite lookup)
+              ↓
+       Build history + system prompt
+              ↓
+       Token check (80% threshold?)
+       ├─ Yes → RotateSession (5 steps)
+       └─ No → Continue
+              ↓
+       Engine.Run (LLM + tools)
+              ↓
+       Update session metadata
+              ↓
+       Generate title (async, first message only)
 ```
 
-**`registry.go`** — Central tool management:
-- Register/lookup tools by name
-- Execute with permission checking and audit logging
-- Generate OpenAI-format tool definitions for LLM requests
-- `ExecuteAll` for batch tool call processing
+**Rotation Flow (5 steps):**
+1. **Memory flush** — Silent Engine.Run to save context to MEMORY.md
+2. **Summarization** — Call gpt-4o-mini for 2-3 paragraph summary
+3. **Daily log** — Append to `workspace/memory/YYYY-MM-DD.md`
+4. **Close session** — Update status to "closed", store summary
+5. **Create new session** — New ID, carry forward summary as first message
 
-**`mcp_tool.go`** — Adapts MCP server tools to the `Tool` interface.
+**`sessions.go` (store layer)**
+- SQLite `sessions` table: ID, channel, title, status, summary, token_estimate, timestamps
+- CRUD methods: CreateSession, GetSession, UpdateSession, ListAllSessions, ActiveSession
+- Migration function: MigrateExistingSessions (converts old chat_id values to session IDs)
 
-**`builtin/`** — 5 built-in tools:
+### `internal/workspace/`
 
-| Tool | File | Safety |
-|------|------|--------|
-| `read_file` | `read_file.go` | Path whitelist (Documents, Projects, Desktop) |
-| `write_file` | `write_file.go` | Path whitelist, creates parent dirs |
-| `run_command` | `run_command.go` | Blocked commands list, 30s timeout |
-| `web_fetch` | `web_fetch.go` | 10s timeout, HTML→text extraction |
-| `web_search` | `web_search.go` | Brave API with DuckDuckGo fallback |
+Workspace management with soul, user files, memory, tools, and daily logs.
+
+**`workspace.go` — Workspace Loading (176 lines)**
+- Load(): reads all workspace files from disk
+- SystemPrompt(): assembles full system prompt with sections
+- DailyLogs: loads last 3 days of `memory/YYYY-MM-DD.md` files
+- Token budget: calculates total prompt size including daily logs
+- Cropping: when over budget, crops soul to 50% of budget
+- File structure:
+  ```
+  workspace/
+  ├── SOUL.md          (main persona/instructions)
+  ├── USER.md          (user context/preferences)
+  ├── MEMORY.md        (persistent memories)
+  ├── TOOLS.md         (tool-specific guidance)
+  └── memory/
+      ├── 2026-02-16.md (daily activity log)
+      ├── 2026-02-15.md
+      └── 2026-02-14.md
+  ```
+
+**loadDailyLogs():**
+- Reads `memory/*.md` files matching YYYY-MM-DD.md format
+- Filters to last N days (default: 3)
+- String comparison for date filtering (ISO 8601 is lexicographically sortable)
+- Returns []DailyLog with date and content
+
+### `internal/wschannel/`
+
+WebSocket channel implementation with command message support.
+
+**`wschannel.go` — WebSocket Channel (241 lines)**
+- Full-duplex WebSocket communication
+- Command message type: `{"type": "command", "command": "new"}` or `"title"`
+- Message message type: `{"type": "message", "text": "...", "image": "..."}`
+- session_rotated event: `{"type": "session_rotated", "session_id": "...", "title": "..."}`
+- Connection management: concurrent map of connections per channel
+- Callbacks: OnMessage, OnNewSession, OnRenameSession
+
+### `internal/httpapi/`
+
+HTTP API with session management endpoints.
+
+**`httpapi.go` — HTTP API (410 lines)**
+- SessionManager interface (optional, graceful degradation)
+- New endpoints:
+  - `GET /sessions` — list all sessions (uses SessionManager if available)
+  - `GET /sessions/{id}` — get session details
+  - `GET /sessions/{id}/messages` — get message history
+  - `POST /sessions/{id}/title` — rename session (JSON body: `{"title": "..."}`)
+- Auth: requireAuth middleware checks Bearer token
+- Error handling: 404 for not found, 400 for bad request, 500 for internal errors
 
 ### `internal/permissions/`
 
@@ -164,7 +241,7 @@ MCP client implementing JSON-RPC 2.0 over stdio.
 
 Telegram bot with streaming support.
 
-**`bot.go`** (~1050 lines) — Core bot logic:
+**`bot.go`** (~1,407 lines) — Core bot logic:
 - Long polling (works behind NAT)
 - Edit-message streaming with adaptive debounce
 - Tool execution loop (up to 999 iterations)
@@ -173,6 +250,10 @@ Telegram bot with streaming support.
 - Per-chat mutex prevents overlapping LLM calls
 - Auto-screenshot after Playwright navigation
 - Message splitting for responses exceeding 4096 chars
+- Progress updates via `engine.OnProgress` callback
+- Rich stats footer (tokens, timing, tool calls, LLM calls, model)
+- MESSAGE_TOO_LONG error handling with chunked sending
+- Concurrent editText chunking for large responses
 
 **`markdown.go`** — LLM markdown → Telegram HTML conversion.
 
@@ -182,21 +263,6 @@ Telegram bot with streaming support.
 | < 1000 chars | 1 second |
 | < 3000 chars | 2 seconds |
 | ≥ 3000 chars | 3 seconds |
-
-### `internal/httpapi/`
-
-REST API for programmatic access.
-
-| Endpoint | Auth | Description |
-|----------|------|-------------|
-| `GET /health` | No | Health check + model info |
-| `POST /chat` | Bearer | Send message, get LLM response with tool loop |
-| `POST /tool` | Bearer | Execute a single tool directly |
-| `POST /reset` | Bearer | Clear a chat session |
-| `GET /sessions` | Bearer | List sessions |
-
-- 30s read timeout, 120s write timeout
-- Graceful shutdown on context cancellation
 
 ### `internal/store/`
 
@@ -224,8 +290,9 @@ JSON configuration with defaults.
 
 - Loads from `~/.config/aidaemon/config.json`
 - Creates data directories on startup
-- Loads system prompt from file or inline
+- Loads system prompt from file or inline (`loadSystemPrompt()`)
 - Validates required fields (telegram_token, telegram_user_id)
+- `HeartbeatDuration()` placeholder (returns 30m, currently unused)
 
 ## Data Flows
 
@@ -237,17 +304,19 @@ JSON configuration with defaults.
  3. Store.AddMessage(chatID, "user", text)
  4. Store.GetHistory(chatID) → last N messages
  5. Build messages: [system_prompt] + history + tool_definitions
- 6. Provider.Stream(ctx, request)
- 7. TokenManager.GetToken() → refresh if expired
- 8. POST api.githubcopilot.com/chat/completions (stream=true)
- 9. Read SSE chunks → send deltas to channel
-10. Bot accumulates text + edits Telegram message (adaptive debounce)
-11. If tool_calls in response:
-    a. Execute each tool via Registry.Execute()
-    b. Append tool results to messages
-    c. Go to step 6 (loop until finish_reason=stop)
-12. Store.AddMessage(chatID, "assistant", fullText)
-13. Final edit with usage stats
+ 6. Engine.Run(ctx, messages, opts) with OnProgress callback
+ 7. Engine trims messages to fit ModelTokenLimit()
+ 8. Provider.Chat(ctx, request) → TokenManager.GetToken() → refresh if expired
+ 9. POST api.githubcopilot.com/chat/completions
+10. On token-limit error: emergency summarize with gpt-4o-mini, retry (up to 3x)
+11. Bot receives ProgressUpdate → edits Telegram placeholder message
+12. If tool_calls in response:
+    a. Execute each tool via Registry.Execute() (with timing)
+    b. Truncate tool results >30K chars
+    c. Append tool results to messages
+    d. Go to step 7 (loop until finish_reason=stop)
+13. Store.AddMessage(chatID, "assistant", fullText)
+14. Final edit with rich stats footer (tokens, timing, tools, LLM calls, model)
 ```
 
 ### Tool Execution
