@@ -39,6 +39,7 @@ type Bot struct {
 	store        *store.Store
 	tools        *tools.Registry
 	engine       *engine.Engine
+	sessionMgr   SessionManager // optional: routes through session lifecycle
 	userID       int64
 	model        string
 	sysPrompt    string
@@ -54,6 +55,13 @@ type Bot struct {
 // Compile-time check: *Bot implements channel.Channel.
 var _ channel.Channel = (*Bot)(nil)
 
+// SessionManager provides session lifecycle management (optional).
+type SessionManager interface {
+	RotateSession(ctx context.Context, channelID string) (newSessionID string, err error)
+	RenameSession(sessionID, title string) error
+	ActiveSession(channelID string) (*store.Session, error)
+}
+
 // Config for creating a new Bot.
 type Config struct {
 	Token        string
@@ -66,6 +74,7 @@ type Config struct {
 	ToolRegistry *tools.Registry
 	DataDir      string
 	WorkspaceDir string
+	SessionMgr   SessionManager // optional: enables /new and /title commands
 }
 
 // Name returns the channel identifier.
@@ -77,6 +86,7 @@ func New(cfg Config) (*Bot, error) {
 		provider:     cfg.Provider,
 		store:        cfg.Store,
 		tools:        cfg.ToolRegistry,
+		sessionMgr:   cfg.SessionMgr,
 		userID:       cfg.UserID,
 		model:        cfg.Model,
 		sysPrompt:    cfg.SystemPrompt,
@@ -109,6 +119,8 @@ func New(cfg Config) (*Bot, error) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/tools", bot.MatchTypePrefix, tb.handleTools)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/context", bot.MatchTypePrefix, tb.handleContext)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/help", bot.MatchTypePrefix, tb.handleHelp)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/new", bot.MatchTypePrefix, tb.handleNew)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/title", bot.MatchTypePrefix, tb.handleTitle)
 
 	return tb, nil
 }
@@ -706,8 +718,16 @@ func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update
 		"<b>💬 Chat</b>\n" +
 		"/reset — clear conversation history\n" +
 		"/model — list available models\n" +
-		"/model &lt;id&gt; — switch model\n\n" +
-		"<b>📊 Monitoring</b>\n" +
+		"/model &lt;id&gt; — switch model\n\n"
+
+	// Add session management commands if available.
+	if tb.sessionMgr != nil {
+		text += "<b>🗂️ Sessions</b>\n" +
+			"/new — start a new session (archives current)\n" +
+			"/title &lt;name&gt; — rename current session\n\n"
+	}
+
+	text += "<b>📊 Monitoring</b>\n" +
 		"/status — model, context health, tool count\n" +
 		"/context — detailed context window breakdown\n" +
 		"/tools — list all available tools\n\n" +
@@ -718,6 +738,80 @@ func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update
 		"• Stats footer shows timing, tokens, and tools used\n" +
 		"• Premium models (⭐) use your Copilot quota"
 	tb.sendHTML(ctx, update.Message.Chat.ID, text)
+}
+
+func (tb *Bot) handleNew(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if !tb.isAuthorized(update.Message.Chat.ID) {
+		return
+	}
+
+	// Check if session manager is configured.
+	if tb.sessionMgr == nil {
+		tb.sendText(ctx, update.Message.Chat.ID, "❌ Session management not enabled.")
+		return
+	}
+
+	chatIDStr := channel.SessionID("telegram", strconv.FormatInt(update.Message.Chat.ID, 10))
+
+	// Rotate the session.
+	newSessionID, err := tb.sessionMgr.RotateSession(ctx, chatIDStr)
+	if err != nil {
+		log.Printf("[telegram] /new: rotation failed: %v", err)
+		tb.sendText(ctx, update.Message.Chat.ID, fmt.Sprintf("❌ Failed to create new session: %v", err))
+		return
+	}
+
+	log.Printf("[telegram] /new: rotated %s → %s", chatIDStr, newSessionID)
+	tb.sendText(ctx, update.Message.Chat.ID, "✨ New session started. Previous conversation archived.")
+}
+
+func (tb *Bot) handleTitle(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if !tb.isAuthorized(update.Message.Chat.ID) {
+		return
+	}
+
+	// Check if session manager is configured.
+	if tb.sessionMgr == nil {
+		tb.sendText(ctx, update.Message.Chat.ID, "❌ Session management not enabled.")
+		return
+	}
+
+	// Parse the title from the command.
+	text := update.Message.Text
+	if !strings.HasPrefix(text, "/title ") {
+		tb.sendText(ctx, update.Message.Chat.ID, "Usage: /title <new title>")
+		return
+	}
+	title := strings.TrimSpace(strings.TrimPrefix(text, "/title "))
+	if title == "" {
+		tb.sendText(ctx, update.Message.Chat.ID, "❌ Title cannot be empty.")
+		return
+	}
+
+	chatIDStr := channel.SessionID("telegram", strconv.FormatInt(update.Message.Chat.ID, 10))
+
+	// Get the active session to find its ID.
+	sess, err := tb.sessionMgr.ActiveSession(chatIDStr)
+	if err != nil {
+		log.Printf("[telegram] /title: get active session failed: %v", err)
+		tb.sendText(ctx, update.Message.Chat.ID, fmt.Sprintf("❌ Failed to get active session: %v", err))
+		return
+	}
+	if sess == nil {
+		tb.sendText(ctx, update.Message.Chat.ID, "❌ No active session found.")
+		return
+	}
+
+	// Rename the session.
+	err = tb.sessionMgr.RenameSession(sess.ID, title)
+	if err != nil {
+		log.Printf("[telegram] /title: rename failed: %v", err)
+		tb.sendText(ctx, update.Message.Chat.ID, fmt.Sprintf("❌ Failed to rename session: %v", err))
+		return
+	}
+
+	log.Printf("[telegram] /title: renamed session %s to %q", sess.ID, title)
+	tb.sendText(ctx, update.Message.Chat.ID, fmt.Sprintf("✅ Session renamed to: %s", title))
 }
 
 // --- Message building ---
