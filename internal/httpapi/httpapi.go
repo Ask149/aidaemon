@@ -12,12 +12,18 @@
 //	GET  /health             — health check
 //	GET  /ws                 — WebSocket upgrade for chat
 //	GET  /                   — embedded chat SPA (static files)
+//	GET  /cron/jobs          — list all cron jobs
+//	POST /cron/jobs          — create a new cron job
+//	PATCH /cron/jobs/{id}    — update a cron job (enable/disable, rename)
+//	DELETE /cron/jobs/{id}   — delete a cron job
 //
 // All endpoints except /health, /ws, and static files require a Bearer token.
 package httpapi
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -25,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Ask149/aidaemon/internal/cron"
 	"github.com/Ask149/aidaemon/internal/engine"
 	"github.com/Ask149/aidaemon/internal/provider"
 	"github.com/Ask149/aidaemon/internal/store"
@@ -78,6 +85,10 @@ func New(cfg Config) *API {
 	mux.HandleFunc("POST /sessions/{id}/title", api.requireAuth(api.handleRenameSession))
 	mux.HandleFunc("POST /reset", api.requireAuth(api.handleReset))
 	mux.HandleFunc("POST /tool", api.requireAuth(api.handleTool))
+	mux.HandleFunc("GET /cron/jobs", api.requireAuth(api.handleListCronJobs))
+	mux.HandleFunc("POST /cron/jobs", api.requireAuth(api.handleCreateCronJob))
+	mux.HandleFunc("PATCH /cron/jobs/{id}", api.requireAuth(api.handleUpdateCronJob))
+	mux.HandleFunc("DELETE /cron/jobs/{id}", api.requireAuth(api.handleDeleteCronJob))
 
 	// Mount WebSocket handler (unauthenticated — uses per-connection session IDs).
 	if cfg.WSHandler != nil {
@@ -408,4 +419,127 @@ func (a *API) handleRenameSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResp(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// --- Cron job handlers ---
+
+func (a *API) handleListCronJobs(w http.ResponseWriter, _ *http.Request) {
+	jobs, err := a.cfg.Store.ListCronJobs()
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResp(w, http.StatusOK, jobs)
+}
+
+type createCronJobRequest struct {
+	Label    string `json:"label"`
+	CronExpr string `json:"cron_expr"`
+	Mode     string `json:"mode"`
+	Payload  string `json:"payload"`
+}
+
+func (a *API) handleCreateCronJob(w http.ResponseWriter, r *http.Request) {
+	var req createCronJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if req.Label == "" || req.CronExpr == "" || req.Payload == "" {
+		jsonError(w, http.StatusBadRequest, "label, cron_expr, and payload are required")
+		return
+	}
+	if req.Mode == "" {
+		req.Mode = "message"
+	}
+
+	// Validate cron expression.
+	sched, err := cron.Parse(req.CronExpr)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid cron expression: "+err.Error())
+		return
+	}
+
+	next := sched.Next(time.Now())
+	b := make([]byte, 6)
+	rand.Read(b)
+	id := "cj_" + hex.EncodeToString(b)
+
+	job := store.CronJob{
+		ID:          id,
+		Label:       req.Label,
+		CronExpr:    req.CronExpr,
+		Mode:        req.Mode,
+		Payload:     req.Payload,
+		ChannelType: "http",
+		ChannelMeta: "{}",
+		Enabled:     true,
+		NextRunAt:   &next,
+		CreatedAt:   time.Now(),
+	}
+
+	if err := a.cfg.Store.CreateCronJob(job); err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResp(w, http.StatusCreated, job)
+}
+
+type updateCronJobRequest struct {
+	Enabled *bool  `json:"enabled,omitempty"`
+	Label   string `json:"label,omitempty"`
+}
+
+func (a *API) handleUpdateCronJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, http.StatusBadRequest, "job id is required")
+		return
+	}
+
+	var req updateCronJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+
+	job, err := a.cfg.Store.GetCronJob(id)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if job == nil {
+		jsonError(w, http.StatusNotFound, "job not found")
+		return
+	}
+
+	if req.Enabled != nil {
+		job.Enabled = *req.Enabled
+	}
+	if req.Label != "" {
+		job.Label = req.Label
+	}
+
+	if err := a.cfg.Store.UpdateCronJob(*job); err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResp(w, http.StatusOK, job)
+}
+
+func (a *API) handleDeleteCronJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, http.StatusBadRequest, "job id is required")
+		return
+	}
+
+	if err := a.cfg.Store.DeleteCronJob(id); err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResp(w, http.StatusOK, map[string]string{"status": "deleted", "id": id})
 }
