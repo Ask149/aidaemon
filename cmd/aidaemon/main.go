@@ -33,6 +33,7 @@ import (
 	"github.com/Ask149/aidaemon/internal/permissions"
 	"github.com/Ask149/aidaemon/internal/provider"
 	"github.com/Ask149/aidaemon/internal/provider/copilot"
+	openaiProvider "github.com/Ask149/aidaemon/internal/provider/openai"
 	"github.com/Ask149/aidaemon/internal/session"
 	"github.com/Ask149/aidaemon/internal/store"
 	"github.com/Ask149/aidaemon/internal/telegram"
@@ -64,6 +65,37 @@ func doLogin() {
 	fmt.Printf("✅ Authenticated. Token: %s...%s\n", token[:4], token[len(token)-4:])
 }
 
+// createProvider creates the configured LLM provider.
+func createProvider(cfg *config.Config) (provider.Provider, error) {
+	switch cfg.Provider {
+	case "copilot", "":
+		tm, err := auth.NewTokenManager()
+		if err != nil {
+			return nil, fmt.Errorf("token manager: %w\nRun 'aidaemon --login' to authenticate", err)
+		}
+		if err := tm.ValidateGitHub(); err != nil {
+			return nil, fmt.Errorf("github auth: %w\nRun 'aidaemon --login' to authenticate", err)
+		}
+		tok, err := tm.GetToken()
+		if err != nil {
+			return nil, fmt.Errorf("copilot token: %w", err)
+		}
+		log.Printf("[daemon] copilot auth OK (expires in %s)", tok.ExpiresIn().Round(time.Minute))
+		return copilot.New(tm), nil
+
+	case "openai":
+		return openaiProvider.New(openaiProvider.Config{
+			BaseURL:         cfg.ProviderConfig.BaseURL,
+			APIKey:          cfg.ProviderConfig.APIKey,
+			AzureAPIVersion: cfg.ProviderConfig.AzureAPIVersion,
+			Model:           cfg.ChatModel,
+		}), nil
+
+	default:
+		return nil, fmt.Errorf("unknown provider %q", cfg.Provider)
+	}
+}
+
 func run() error {
 	// 1. Load config.
 	cfg, err := config.Load()
@@ -83,22 +115,11 @@ func run() error {
 		log.Printf("[daemon] logging to %s", logPath)
 	}
 
-	// 2. Auth — create token manager and validate.
-	tm, err := auth.NewTokenManager()
+	// 2-3. Provider.
+	prov, err := createProvider(cfg)
 	if err != nil {
-		return fmt.Errorf("token manager: %w\nRun 'aidaemon --login' to authenticate", err)
+		return fmt.Errorf("provider: %w", err)
 	}
-	if err := tm.ValidateGitHub(); err != nil {
-		return fmt.Errorf("github auth: %w\nRun 'aidaemon --login' to authenticate", err)
-	}
-	tok, err := tm.GetToken()
-	if err != nil {
-		return fmt.Errorf("copilot token: %w", err)
-	}
-	log.Printf("[daemon] copilot auth OK (expires in %s)", tok.ExpiresIn().Round(time.Minute))
-
-	// 3. Provider.
-	prov := copilot.New(tm)
 	log.Printf("[daemon] provider: %s (%d models)", prov.Name(), len(prov.Models()))
 
 	// 4. Tool registry (built-in tools).
