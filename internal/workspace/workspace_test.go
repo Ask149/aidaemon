@@ -250,6 +250,70 @@ func TestLoad_NoSkillsDir(t *testing.T) {
 	}
 }
 
+func TestSystemPrompt_IncludesSkills(t *testing.T) {
+	dir := t.TempDir()
+	skillsDir := t.TempDir()
+	writeTestFile(t, dir, FileSoul, "I am the soul.")
+	writeTestFile(t, dir, FileTools, "Tool notes here.")
+	writeTestFile(t, skillsDir, "coding.md", "Write tests first.")
+	writeTestFile(t, skillsDir, "writing.md", "Be concise.")
+
+	w := Load(dir, skillsDir)
+	prompt := w.SystemPrompt()
+
+	// Skills section should exist.
+	if !strings.Contains(prompt, "## Active Skills") {
+		t.Error("expected '## Active Skills' header in prompt")
+	}
+	if !strings.Contains(prompt, "### coding") {
+		t.Error("expected '### coding' subheader in prompt")
+	}
+	if !strings.Contains(prompt, "Write tests first.") {
+		t.Error("expected coding skill content in prompt")
+	}
+	if !strings.Contains(prompt, "### writing") {
+		t.Error("expected '### writing' subheader in prompt")
+	}
+
+	// Skills should appear after tools, before daily logs.
+	toolIdx := strings.Index(prompt, "## Tool Notes")
+	skillIdx := strings.Index(prompt, "## Active Skills")
+	if skillIdx <= toolIdx {
+		t.Errorf("skills (%d) should come after tools (%d)", skillIdx, toolIdx)
+	}
+}
+
+func TestSystemPrompt_NoSkills(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, dir, FileSoul, "I am the soul.")
+	w := Load(dir, "")
+	prompt := w.SystemPrompt()
+	if strings.Contains(prompt, "## Active Skills") {
+		t.Error("should not have skills section when no skills loaded")
+	}
+}
+
+func TestSystemPrompt_SkillsBeforeDailyLogs(t *testing.T) {
+	dir := t.TempDir()
+	skillsDir := t.TempDir()
+	writeTestFile(t, skillsDir, "test.md", "Test skill.")
+
+	// Create a daily log.
+	memDir := filepath.Join(dir, "memory")
+	os.MkdirAll(memDir, 0700)
+	today := time.Now().Format("2006-01-02")
+	writeTestFile(t, memDir, today+".md", "# Daily log")
+
+	w := Load(dir, skillsDir)
+	prompt := w.SystemPrompt()
+
+	skillIdx := strings.Index(prompt, "## Active Skills")
+	logIdx := strings.Index(prompt, "## Recent Activity Logs")
+	if skillIdx >= logIdx {
+		t.Errorf("skills (%d) should come before daily logs (%d)", skillIdx, logIdx)
+	}
+}
+
 // writeTestFile is a test helper that writes content to a file in dir.
 func writeTestFile(t *testing.T, dir, name, content string) {
 	t.Helper()

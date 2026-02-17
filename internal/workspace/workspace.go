@@ -129,7 +129,16 @@ func (w *Workspace) SystemPrompt() string {
 		parts = append(parts, "## Tool Notes\n\n"+w.Tools)
 	}
 
-	// After TOOLS section, add daily logs.
+	// After TOOLS section, add active skills.
+	if len(w.Skills) > 0 {
+		var skillParts []string
+		for _, s := range w.Skills {
+			skillParts = append(skillParts, "### "+s.Name+"\n\n"+s.Content)
+		}
+		parts = append(parts, "## Active Skills\n\n"+strings.Join(skillParts, "\n\n"))
+	}
+
+	// After skills section, add daily logs.
 	if len(w.DailyLogs) > 0 {
 		var logParts []string
 		for _, dl := range w.DailyLogs {
