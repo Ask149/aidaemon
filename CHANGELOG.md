@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-02-17
+
 ### Added
 - **Scheduled tasks (cron)** — create recurring jobs via natural language in Telegram
   - Pure Go 5-field cron expression parser (supports `*`, ranges, lists, steps)
@@ -106,6 +108,7 @@ First complete release with all core features.
 - Pre-commit hook to block accidental credential commits
 - Dual logging (stderr + file)
 
-[Unreleased]: https://github.com/Ask149/aidaemon/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/Ask149/aidaemon/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/Ask149/aidaemon/compare/v2.0.1...v2.1.0
 [2.0.0]: https://github.com/Ask149/aidaemon/compare/v0.1.0...v2.0.0
 [0.1.0]: https://github.com/Ask149/aidaemon/releases/tag/v0.1.0
