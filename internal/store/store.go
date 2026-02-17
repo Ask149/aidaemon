@@ -22,6 +22,20 @@ type SessionInfo struct {
 	LastActivity time.Time `json:"last_activity"`
 }
 
+// Session represents a persistent conversation session with metadata.
+type Session struct {
+	ID            string     `json:"id"`
+	Channel       string     `json:"channel"`
+	Title         string     `json:"title,omitempty"`
+	Status        string     `json:"status"` // "active" or "closed"
+	Summary       string     `json:"summary,omitempty"`
+	TokenEstimate int        `json:"token_estimate"`
+	CreatedAt     time.Time  `json:"created_at"`
+	ClosedAt      *time.Time `json:"closed_at,omitempty"`
+	LastActivity  time.Time  `json:"last_activity"`
+	MessageCount  int        `json:"message_count,omitempty"` // populated by queries, not stored
+}
+
 // Message is a single conversation message.
 type Message struct {
 	Role      string    `json:"role"`
@@ -64,6 +78,21 @@ type Conversation interface {
 
 	// ListSessions returns info about all chat sessions, ordered by most recent activity.
 	ListSessions() ([]SessionInfo, error)
+
+	// CreateSession creates a new session and returns it.
+	CreateSession(session Session) error
+
+	// GetSession returns a session by ID.
+	GetSession(id string) (*Session, error)
+
+	// ActiveSession returns the active session for a channel, or nil if none.
+	ActiveSession(channel string) (*Session, error)
+
+	// UpdateSession updates session metadata (title, status, summary, token_estimate, etc.).
+	UpdateSession(session Session) error
+
+	// ListAllSessions returns all sessions, optionally filtered by channel, newest first.
+	ListAllSessions(channel string) ([]Session, error)
 
 	// Close closes the underlying storage.
 	Close() error
@@ -134,7 +163,16 @@ func (s *SQLiteStore) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_conv_chat
 			ON conversations(chat_id, created_at);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Migrate sessions table.
+	if err := s.migrateSessions(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // GetHistory returns the last N messages for a chat, ordered oldest→newest.

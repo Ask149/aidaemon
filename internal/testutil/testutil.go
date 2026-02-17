@@ -147,6 +147,7 @@ func (d *DummyTool) Execute(ctx context.Context, args map[string]interface{}) (s
 // It stores messages in a map keyed by chat ID.
 type MemoryStore struct {
 	messages map[string][]store.MessageWithID
+	sessions []store.Session
 	limit    int
 	nextID   int64
 }
@@ -262,6 +263,53 @@ func (m *MemoryStore) ListSessions() ([]store.SessionInfo, error) {
 		return sessions[i].LastActivity.After(sessions[j].LastActivity)
 	})
 	return sessions, nil
+}
+
+func (m *MemoryStore) CreateSession(session store.Session) error {
+	m.sessions = append(m.sessions, session)
+	return nil
+}
+
+func (m *MemoryStore) GetSession(id string) (*store.Session, error) {
+	for i := range m.sessions {
+		if m.sessions[i].ID == id {
+			return &m.sessions[i], nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *MemoryStore) ActiveSession(channel string) (*store.Session, error) {
+	for i := range m.sessions {
+		if m.sessions[i].Channel == channel && m.sessions[i].Status == "active" {
+			return &m.sessions[i], nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *MemoryStore) UpdateSession(session store.Session) error {
+	for i := range m.sessions {
+		if m.sessions[i].ID == session.ID {
+			m.sessions[i] = session
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *MemoryStore) ListAllSessions(channel string) ([]store.Session, error) {
+	var result []store.Session
+	for _, sess := range m.sessions {
+		if channel == "" || sess.Channel == channel {
+			result = append(result, sess)
+		}
+	}
+	// Sort by last_activity DESC.
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].LastActivity.After(result[j].LastActivity)
+	})
+	return result, nil
 }
 
 // TempDir creates a temporary directory for testing file operations.
