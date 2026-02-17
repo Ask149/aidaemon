@@ -114,3 +114,16 @@ func TestTokenLimit_Default(t *testing.T) {
 		t.Errorf("expected default TokenLimit=%d, got %d", want, cfg.TokenLimit)
 	}
 }
+
+func TestTokenLimit_ZeroDefaultsTo128k(t *testing.T) {
+	cfg := Config{
+		ChatModel:  "test-model",
+		TokenLimit: 0,
+	}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate() error: %v", err)
+	}
+	if cfg.TokenLimit != 128000 {
+		t.Errorf("expected TokenLimit=128000 after validate(), got %d", cfg.TokenLimit)
+	}
+}

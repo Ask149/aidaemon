@@ -185,6 +185,9 @@ func (c *Config) validate() error {
 	if c.MaxConversationMessages < 2 {
 		c.MaxConversationMessages = 2
 	}
+	if c.TokenLimit <= 0 {
+		c.TokenLimit = 128000
+	}
 	return nil
 }
 
