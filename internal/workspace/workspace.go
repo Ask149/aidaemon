@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // File name constants for workspace markdown files.
@@ -35,6 +36,12 @@ func IsAgentWritable(name string) bool {
 // above which we warn about prompt size.
 const tokenBudgetChars = 6000
 
+// DailyLog holds a single daily memory log file.
+type DailyLog struct {
+	Date    string // "2006-01-02"
+	Content string
+}
+
 // Workspace holds the loaded contents of a workspace directory.
 type Workspace struct {
 	// Dir is the workspace directory path.
@@ -52,6 +59,9 @@ type Workspace struct {
 	// Tools is the content of TOOLS.md (agent's tool notes).
 	Tools string
 
+	// DailyLogs contains recent daily memory log contents (last 3 days).
+	DailyLogs []DailyLog
+
 	// OverTokenBudget is true when the total workspace content exceeds
 	// the character budget (~2K tokens).
 	OverTokenBudget bool
@@ -67,6 +77,9 @@ func Load(dir string) *Workspace {
 	w.User = readFile(dir, FileUser)
 	w.Memory = readFile(dir, FileMemory)
 	w.Tools = readFile(dir, FileTools)
+
+	// Load recent daily logs (last 3 days).
+	w.DailyLogs = loadDailyLogs(dir, 3)
 
 	total := len(w.Soul) + len(w.User) + len(w.Memory) + len(w.Tools)
 	if total > tokenBudgetChars {
@@ -100,6 +113,15 @@ func (w *Workspace) SystemPrompt() string {
 		parts = append(parts, "## Tool Notes\n\n"+w.Tools)
 	}
 
+	// After TOOLS section, add daily logs.
+	if len(w.DailyLogs) > 0 {
+		var logParts []string
+		for _, dl := range w.DailyLogs {
+			logParts = append(logParts, dl.Content)
+		}
+		parts = append(parts, "## Recent Activity Logs\n\n"+strings.Join(logParts, "\n\n---\n\n"))
+	}
+
 	return strings.Join(parts, "\n\n---\n\n")
 }
 
@@ -111,4 +133,37 @@ func readFile(dir, name string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// loadDailyLogs reads memory/YYYY-MM-DD.md files from the last N days.
+func loadDailyLogs(dir string, days int) []DailyLog {
+	memDir := filepath.Join(dir, "memory")
+	entries, err := os.ReadDir(memDir)
+	if err != nil {
+		return nil
+	}
+
+	cutoff := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
+	var logs []DailyLog
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		// Expect YYYY-MM-DD.md format.
+		if len(name) != 13 || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		dateStr := strings.TrimSuffix(name, ".md")
+		if dateStr < cutoff {
+			continue
+		}
+
+		content := readFile(memDir, name)
+		if content != "" {
+			logs = append(logs, DailyLog{Date: dateStr, Content: content})
+		}
+	}
+	return logs
 }

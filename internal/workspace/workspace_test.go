@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadWorkspace_Empty(t *testing.T) {
@@ -134,6 +135,36 @@ func TestAgentWritableFiles(t *testing.T) {
 	}
 	if IsAgentWritable(FileUser) {
 		t.Error("USER.md should not be agent-writable")
+	}
+}
+
+func TestLoad_IncludesRecentDailyLogs(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create memory directory with daily logs.
+	memDir := filepath.Join(dir, "memory")
+	os.MkdirAll(memDir, 0700)
+
+	today := time.Now()
+	for i := 0; i < 5; i++ {
+		date := today.AddDate(0, 0, -i)
+		name := date.Format("2006-01-02") + ".md"
+		os.WriteFile(filepath.Join(memDir, name), []byte("# Log "+name), 0644)
+	}
+
+	ws := Load(dir)
+
+	// SystemPrompt should include last 3 days only.
+	prompt := ws.SystemPrompt()
+	todayStr := today.Format("2006-01-02")
+	if !strings.Contains(prompt, todayStr) {
+		t.Error("expected today's log in prompt")
+	}
+
+	// 4 days ago should NOT be in prompt.
+	oldDate := today.AddDate(0, 0, -4).Format("2006-01-02")
+	if strings.Contains(prompt, oldDate) {
+		t.Error("old log should not be in prompt")
 	}
 }
 
