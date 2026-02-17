@@ -30,8 +30,8 @@ import (
 	"github.com/Ask149/aidaemon/internal/imageutil"
 	"github.com/Ask149/aidaemon/internal/mcp"
 	"github.com/Ask149/aidaemon/internal/permissions"
-	"github.com/Ask149/aidaemon/internal/provider"
 	"github.com/Ask149/aidaemon/internal/provider/copilot"
+	"github.com/Ask149/aidaemon/internal/session"
 	"github.com/Ask149/aidaemon/internal/store"
 	"github.com/Ask149/aidaemon/internal/telegram"
 	"github.com/Ask149/aidaemon/internal/tools"
@@ -175,36 +175,39 @@ func run() error {
 	log.Printf("[daemon] workspace: %s (soul=%d, user=%d, memory=%d, tools=%d chars)",
 		wsDir, len(ws.Soul), len(ws.User), len(ws.Memory), len(ws.Tools))
 
+	// 5e. Create session manager.
+	mgr := session.NewManager(session.ManagerConfig{
+		Store:        st,
+		Engine:       &engine.Engine{Provider: prov, Registry: registry},
+		Model:        cfg.ChatModel,
+		TokenLimit:   cfg.TokenLimit,
+		Threshold:    0.8,
+		WorkspaceDir: wsDir,
+		SystemPromptFunc: func() string {
+			return workspace.Load(wsDir).SystemPrompt()
+		},
+	})
+	log.Printf("[daemon] session manager created")
+
+	// 5f. Migrate existing sessions to use daily rotation.
+	st.MigrateExistingSessions()
+	log.Printf("[daemon] existing sessions migrated")
+
 	// 6. Start services.
 	log.Println("[daemon] starting...")
 
-	// 6a. WebSocket channel — delegates to engine with image support.
+	// 6a. Start daily session rotation.
+	stopDaily := mgr.StartDailyRotation(ctx)
+	defer stopDaily()
+	log.Println("[daemon] daily session rotation started")
+
+	// 6b. WebSocket channel — delegates to session manager with image support.
 	// Declare wsCh first so the OnImage closure can reference it.
 	var wsCh *wschannel.Channel
 	wsCh = wschannel.New(wschannel.Config{
 		OnMessage: func(ctx context.Context, sessionID, text string) (string, error) {
-			if err := st.AddMessage(sessionID, "user", text); err != nil {
-				return "", err
-			}
-
-			history, err := st.GetHistory(sessionID)
-			if err != nil {
-				return "", err
-			}
-
-			ws := workspace.Load(wsDir)
-			messages := make([]provider.Message, 0, len(history)+1)
-			messages = append(messages, provider.Message{Role: "system", Content: ws.SystemPrompt()})
-			for _, m := range history {
-				messages = append(messages, provider.Message{Role: m.Role, Content: m.Content})
-			}
-
-			// Create a per-call engine with ImageAwareExecutor so
-			// screenshots are delivered to the correct WS session.
-			eng := &engine.Engine{
-				Provider: prov,
-				Registry: registry,
-				Executor: &engine.ImageAwareExecutor{
+			result, err := mgr.HandleMessage(ctx, sessionID, text, session.HandleOptions{
+				ToolExecutor: &engine.ImageAwareExecutor{
 					Registry: registry,
 					OnImage: func(ctx context.Context, toolName string, images []imageutil.Image) {
 						for _, img := range images {
@@ -214,24 +217,14 @@ func run() error {
 						}
 					},
 				},
-			}
-
-			result, err := eng.Run(ctx, messages, engine.RunOptions{Model: cfg.ChatModel, MaxIterations: 25})
+			})
 			if err != nil {
-				// Return partial result if available (e.g., max iterations reached).
-				if result != nil && result.Content != "" {
-					if saveErr := st.AddMessage(sessionID, "assistant", result.Content); saveErr != nil {
-						log.Printf("[wschannel] store error: %v", saveErr)
-					}
-					return result.Content, nil
-				}
 				return "", err
 			}
-
-			if err := st.AddMessage(sessionID, "assistant", result.Content); err != nil {
-				log.Printf("[wschannel] store error: %v", err)
-			}
 			return result.Content, nil
+		},
+		OnNewSession: func(ctx context.Context, sessionID string) (string, error) {
+			return mgr.RotateSession(ctx, sessionID)
 		},
 	})
 	log.Println("[daemon] websocket channel ready")
@@ -239,15 +232,16 @@ func run() error {
 	// 6b. HTTP API (optional — requires api_token and port > 0).
 	if cfg.APIToken != "" && cfg.Port > 0 {
 		api := httpapi.New(httpapi.Config{
-			Port:         cfg.Port,
-			Token:        cfg.APIToken,
-			Store:        st,
-			Registry:     registry,
-			Provider:     prov,
-			Model:        cfg.ChatModel,
-			SysPrompt:    initialPrompt,
-			WorkspaceDir: wsDir,
-			WSHandler:    wsCh.Handler(),
+			Port:           cfg.Port,
+			Token:          cfg.APIToken,
+			Store:          st,
+			Registry:       registry,
+			Provider:       prov,
+			Model:          cfg.ChatModel,
+			SysPrompt:      initialPrompt,
+			WorkspaceDir:   wsDir,
+			WSHandler:      wsCh.Handler(),
+			SessionManager: mgr,
 		})
 		go func() {
 			if err := api.Start(ctx); err != nil {
@@ -273,6 +267,7 @@ func run() error {
 			ToolRegistry: registry,
 			DataDir:      cfg.DataDir,
 			WorkspaceDir: wsDir,
+			SessionMgr:   mgr,
 		})
 		if err != nil {
 			return fmt.Errorf("telegram: %w", err)
