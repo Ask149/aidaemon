@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-02-16
+
+Major release with session lifecycle management and Windows support.
+
 ### Added
 - **Session lifecycle management** — persistent session IDs with auto-generated titles
 - `/new` command (Telegram + WebSocket) — start new session, archives current conversation
@@ -20,6 +24,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `session_rotated` WebSocket event — notifies clients when session rotates
 - Token budget includes daily logs — workspace token calculation now accounts for memory logs
 - Race-safe test utilities — MemoryStore now uses mutex protection
+- **Windows support** — full cross-platform compatibility (Windows, macOS, Linux)
+- Windows service setup documentation — Task Scheduler instructions
 
 ### Changed
 - Conversations are now session-based instead of infinite per-channel
@@ -82,5 +88,6 @@ First complete release with all core features.
 - Pre-commit hook to block accidental credential commits
 - Dual logging (stderr + file)
 
-[Unreleased]: https://github.com/Ask149/aidaemon/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Ask149/aidaemon/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/Ask149/aidaemon/compare/v0.1.0...v2.0.0
 [0.1.0]: https://github.com/Ask149/aidaemon/releases/tag/v0.1.0

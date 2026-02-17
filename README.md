@@ -27,30 +27,46 @@ Chat with GPT-5, Claude Opus 4.6, Gemini 3 Pro, and 10+ other models from your p
 
 ### Prerequisites
 
-- **macOS** (ARM64 or Intel) or Linux
+- **Operating System:** Windows, macOS, or Linux
 - **Go 1.25+**
 - **GitHub Copilot** subscription ($10/month)
 - **Telegram** account
 
 ### Install
 
+**macOS / Linux:**
 ```bash
 git clone https://github.com/Ask149/aidaemon.git
 cd aidaemon
 go build -o aidaemon ./cmd/aidaemon/
 ```
 
+**Windows (PowerShell):**
+```powershell
+git clone https://github.com/Ask149/aidaemon.git
+cd aidaemon
+go build -o aidaemon.exe ./cmd/aidaemon/
+```
+
 ### Authenticate
 
+**macOS / Linux:**
 ```bash
 ./aidaemon --login
+```
+
+**Windows (PowerShell):**
+```powershell
+.\aidaemon.exe --login
 ```
 
 Follow the GitHub device code flow — open the URL, enter the code, authorize.
 
 ### Configure
 
-Create `~/.config/aidaemon/config.json`:
+**macOS / Linux:** Create `~/.config/aidaemon/config.json`
+
+**Windows:** Create `%USERPROFILE%\.config\aidaemon\config.json`
 
 ```jsonc
 {
@@ -83,11 +99,23 @@ When `~/.config/aidaemon/system_prompt.md` exists, it is loaded automatically an
 
 ### Run
 
+**macOS / Linux:**
 ```bash
 ./aidaemon
 ```
 
+**Windows (PowerShell):**
+```powershell
+.\aidaemon.exe
+```
+
 The daemon starts, connects to Telegram, and waits for your messages.
+
+**Note for Windows users:**
+- The daemon will create its configuration directory at `%USERPROFILE%\.config\aidaemon\`
+- Database path: `%USERPROFILE%\.config\aidaemon\aidaemon.db`
+- Logs: `%USERPROFILE%\.config\aidaemon\data\logs\`
+- MCP servers (Node.js-based) require Node.js to be installed and in PATH
 
 ## Usage
 
@@ -314,9 +342,13 @@ internal/
 
 ## Running as a Service
 
+AIDaemon includes scripts for running as a background service on macOS and Linux.
+
+### macOS
+
 AIDaemon includes a watchdog script that keeps the daemon alive. It checks every 30 minutes (via macOS `launchd`) and restarts the daemon if it crashed or was stopped.
 
-### Quick setup
+#### Quick setup
 
 ```bash
 # Install the launchd agent (runs every 30 min + at login)
@@ -329,7 +361,7 @@ That's it. The watchdog will:
 - Rotate daemon logs when they exceed 50 MB
 - Log all health checks to `~/.config/aidaemon/data/logs/watchdog.log`
 
-### Manual control
+#### Manual control
 
 ```bash
 make watchdog              # Run the watchdog once manually
@@ -337,7 +369,84 @@ make watchdog              # Run the watchdog once manually
 make watchdog-uninstall    # Remove the launchd agent
 ```
 
-### How it works
+### Linux (systemd)
+
+Create a systemd user service:
+
+```bash
+# Create service file
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/aidaemon.service << 'EOF'
+[Unit]
+Description=AIDaemon - Personal AI Assistant
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/path/to/aidaemon/aidaemon
+Restart=always
+RestartSec=10
+StandardOutput=append:%h/.config/aidaemon/data/logs/aidaemon.log
+StandardError=append:%h/.config/aidaemon/data/logs/aidaemon.log
+
+[Install]
+WantedBy=default.target
+EOF
+
+# Enable and start
+systemctl --user enable aidaemon.service
+systemctl --user start aidaemon.service
+
+# Check status
+systemctl --user status aidaemon.service
+```
+
+### Windows (Task Scheduler)
+
+Create a scheduled task to run AIDaemon at startup:
+
+**Using PowerShell (as Administrator):**
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "C:\path\to\aidaemon.exe" -WorkingDirectory "C:\path\to\aidaemon"
+$trigger = New-ScheduledTaskTrigger -AtLogon
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType Interactive
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+
+Register-ScheduledTask -TaskName "AIDaemon" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "Personal AI Assistant Daemon"
+```
+
+**Manual setup:**
+1. Open Task Scheduler (`taskschd.msc`)
+2. Create Task → General tab:
+   - Name: `AIDaemon`
+   - Run whether user is logged on or not
+   - Run with highest privileges (optional)
+3. Triggers tab → New:
+   - Begin the task: At log on
+   - Specific user: (your username)
+4. Actions tab → New:
+   - Program: `C:\path\to\aidaemon.exe`
+   - Start in: `C:\path\to\aidaemon`
+5. Settings tab:
+   - Allow task to be run on demand
+   - If task fails, restart every 5 minutes
+   - Stop the task if it runs longer than: (uncheck)
+
+**View logs:**
+```powershell
+Get-Content "$env:USERPROFILE\.config\aidaemon\data\logs\aidaemon.log" -Tail 50
+```
+
+**Stop the task:**
+```powershell
+Stop-ScheduledTask -TaskName "AIDaemon"
+```
+
+**Remove the task:**
+```powershell
+Unregister-ScheduledTask -TaskName "AIDaemon" -Confirm:$false
+```
 
 | File | Purpose |
 |------|----------|
