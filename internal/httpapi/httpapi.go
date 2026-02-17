@@ -2,13 +2,16 @@
 //
 // Endpoints:
 //
-//	POST /chat          — send a message, get LLM response (with tool use)
-//	GET  /sessions      — list active chat sessions
-//	POST /reset         — clear a chat session
-//	POST /tool          — execute a single tool directly
-//	GET  /health        — health check
-//	GET  /ws            — WebSocket upgrade for chat
-//	GET  /              — embedded chat SPA (static files)
+//	POST /chat               — send a message, get LLM response (with tool use)
+//	GET  /sessions           — list active chat sessions
+//	GET  /sessions/{id}      — get session details by ID
+//	GET  /sessions/{id}/messages — get all messages for a session
+//	POST /sessions/{id}/title    — rename a session
+//	POST /reset              — clear a chat session
+//	POST /tool               — execute a single tool directly
+//	GET  /health             — health check
+//	GET  /ws                 — WebSocket upgrade for chat
+//	GET  /                   — embedded chat SPA (static files)
 //
 // All endpoints except /health, /ws, and static files require a Bearer token.
 package httpapi
@@ -32,15 +35,20 @@ import (
 
 // Config holds the HTTP API configuration.
 type Config struct {
-	Port         int               `json:"port"`
-	Token        string            `json:"token"`
-	Store        *store.Store      `json:"-"`
-	Registry     *tools.Registry   `json:"-"`
-	Provider     provider.Provider `json:"-"`
-	Model        string            `json:"model"`
-	SysPrompt    string            `json:"sys_prompt"`
-	WorkspaceDir string            `json:"workspace_dir"`
-	WSHandler    http.Handler      `json:"-"` // Optional WebSocket upgrade handler.
+	Port           int               `json:"port"`
+	Token          string            `json:"token"`
+	Store          *store.Store      `json:"-"`
+	Registry       *tools.Registry   `json:"-"`
+	Provider       provider.Provider `json:"-"`
+	Model          string            `json:"model"`
+	SysPrompt      string            `json:"sys_prompt"`
+	WorkspaceDir   string            `json:"workspace_dir"`
+	WSHandler      http.Handler      `json:"-"` // Optional WebSocket upgrade handler.
+	SessionManager interface {
+		GetSession(id string) (*store.Session, error)
+		ListSessions(channel string) ([]store.Session, error)
+		RenameSession(id, title string) error
+	} `json:"-"` // Optional session lifecycle manager.
 }
 
 // API is the HTTP server.
@@ -64,6 +72,9 @@ func New(cfg Config) *API {
 	mux.HandleFunc("GET /health", api.handleHealth)
 	mux.HandleFunc("POST /chat", api.requireAuth(api.handleChat))
 	mux.HandleFunc("GET /sessions", api.requireAuth(api.handleSessions))
+	mux.HandleFunc("GET /sessions/{id}", api.requireAuth(api.handleGetSession))
+	mux.HandleFunc("GET /sessions/{id}/messages", api.requireAuth(api.handleGetSessionMessages))
+	mux.HandleFunc("POST /sessions/{id}/title", api.requireAuth(api.handleRenameSession))
 	mux.HandleFunc("POST /reset", api.requireAuth(api.handleReset))
 	mux.HandleFunc("POST /tool", api.requireAuth(api.handleTool))
 
@@ -220,6 +231,18 @@ func (a *API) handleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSessions(w http.ResponseWriter, _ *http.Request) {
+	// If SessionManager is available, use it for richer session data.
+	if a.cfg.SessionManager != nil {
+		sessions, err := a.cfg.SessionManager.ListSessions("")
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "list sessions: "+err.Error())
+			return
+		}
+		jsonResp(w, http.StatusOK, sessions)
+		return
+	}
+
+	// Fallback to legacy SessionInfo format.
 	sessions, err := a.cfg.Store.ListSessions()
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "list sessions: "+err.Error())
@@ -291,4 +314,97 @@ func jsonResp(w http.ResponseWriter, status int, data interface{}) {
 
 func jsonError(w http.ResponseWriter, status int, message string) {
 	jsonResp(w, status, map[string]string{"error": message})
+}
+
+func (a *API) handleGetSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, http.StatusBadRequest, "session id is required")
+		return
+	}
+
+	// Use SessionManager if available, otherwise fall back to Store.
+	if a.cfg.SessionManager != nil {
+		sess, err := a.cfg.SessionManager.GetSession(id)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if sess == nil {
+			jsonError(w, http.StatusNotFound, "not found")
+			return
+		}
+		jsonResp(w, http.StatusOK, sess)
+		return
+	}
+
+	// Fallback: use Store directly.
+	sess, err := a.cfg.Store.GetSession(id)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if sess == nil {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	jsonResp(w, http.StatusOK, sess)
+}
+
+func (a *API) handleGetSessionMessages(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, http.StatusBadRequest, "session id is required")
+		return
+	}
+
+	msgs, err := a.cfg.Store.GetHistory(id)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResp(w, http.StatusOK, msgs)
+}
+
+func (a *API) handleRenameSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, http.StatusBadRequest, "session id is required")
+		return
+	}
+
+	var body struct {
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+
+	// Use SessionManager if available.
+	if a.cfg.SessionManager != nil {
+		if err := a.cfg.SessionManager.RenameSession(id, body.Title); err != nil {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		jsonResp(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	// Fallback: read session, update title, save.
+	sess, err := a.cfg.Store.GetSession(id)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if sess == nil {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	sess.Title = body.Title
+	if err := a.cfg.Store.UpdateSession(*sess); err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResp(w, http.StatusOK, map[string]string{"status": "ok"})
 }
