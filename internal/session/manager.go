@@ -156,6 +156,11 @@ func (m *Manager) HandleMessage(ctx context.Context, channelID, text string, opt
 		log.Printf("[session] update session: %v", updateErr)
 	}
 
+	// Generate title after first exchange (async).
+	if sess.Title == "" && result != nil && result.Content != "" {
+		go m.generateTitle(sess.ID, text, result.Content)
+	}
+
 	if err != nil {
 		if result != nil && result.Content != "" {
 			return result, nil // partial result
@@ -411,4 +416,56 @@ func (m *Manager) writeDailyLog(sess *store.Session, summary string) {
 		fmt.Fprintf(f, "# %s\n", dateStr)
 	}
 	fmt.Fprint(f, entry)
+}
+
+// generateTitle asynchronously generates a session title from the first exchange.
+func (m *Manager) generateTitle(sessionID, userMsg, assistantMsg string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	input := userMsg
+	if len(input) > 200 {
+		input = input[:200]
+	}
+	reply := assistantMsg
+	if len(reply) > 200 {
+		reply = reply[:200]
+	}
+
+	req := provider.ChatRequest{
+		Model: "gpt-4o-mini",
+		Messages: []provider.Message{
+			{
+				Role:    "system",
+				Content: "Generate a 3-6 word title for this conversation. Return ONLY the title, no quotes or punctuation.",
+			},
+			{
+				Role:    "user",
+				Content: fmt.Sprintf("User: %s\nAssistant: %s", input, reply),
+			},
+		},
+	}
+
+	resp, err := m.engine.Provider.Chat(ctx, req)
+	if err != nil || resp.Content == "" {
+		// Fallback: use first 50 chars of user message.
+		title := userMsg
+		if len(title) > 50 {
+			title = title[:50] + "..."
+		}
+		resp = &provider.ChatResponse{Content: title}
+	}
+
+	title := strings.TrimSpace(resp.Content)
+	if title == "" {
+		return
+	}
+
+	sess, err := m.store.GetSession(sessionID)
+	if err != nil || sess == nil {
+		return
+	}
+	sess.Title = title
+	m.store.UpdateSession(*sess)
+	log.Printf("[session] generated title for %s: %q", sessionID, title)
 }
