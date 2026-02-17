@@ -9,6 +9,7 @@ Chat with GPT-5, Claude Opus 4.6, Gemini 3 Pro, and 10+ other models from your p
 - **13+ premium models** — GPT-5, Claude Opus 4.6, Gemini 3 Pro, and more via GitHub Copilot API
 - **Session management** — persistent session IDs with titles, browse/switch via web UI or API
 - **Auto-rotation** — daily 4AM rotation with memory flush and summary
+- **Skill files** — drop `.md` files into `~/.config/aidaemon/skills/` to inject custom instructions
 - **Smart context** — load recent daily memory logs (last 3 days) into system prompt
 - **Streaming responses** — live typing indicators with adaptive debounce
 - **Tool execution** — read/write files, run shell commands, search the web
@@ -292,6 +293,53 @@ Models are auto-discovered from the Copilot API and refreshed hourly.
 
 **Premium tier** (~300 req/month on Copilot Individual):
 `gpt-5` · `gpt-5-mini` · `gpt-5.1` · `gpt-5.2` · `claude-opus-4.6` · `claude-sonnet-4.5` · `claude-sonnet-4` · `claude-haiku-4.5` · `gemini-2.5-pro` · `gemini-3-pro-preview` · `gemini-3-flash-preview`
+
+## Skill Files
+
+Drop markdown files into `~/.config/aidaemon/skills/` to give your agent custom instructions. All `*.md` files are automatically loaded into the system prompt on every message.
+
+```bash
+mkdir -p ~/.config/aidaemon/skills
+```
+
+**Example: coding standards**
+```bash
+cat > ~/.config/aidaemon/skills/coding-standards.md << 'EOF'
+When writing Go code:
+- Always handle errors explicitly
+- Use table-driven tests
+- Keep functions under 40 lines
+EOF
+```
+
+**Example: writing style**
+```bash
+cat > ~/.config/aidaemon/skills/writing-style.md << 'EOF'
+When writing emails or messages for me:
+- Be concise and direct
+- Use bullet points over paragraphs
+- Never use corporate jargon
+EOF
+```
+
+Skills appear in the system prompt as:
+```
+## Active Skills
+
+### coding-standards
+[content of coding-standards.md]
+
+### writing-style
+[content of writing-style.md]
+```
+
+**How it works:**
+- All `*.md` files in `~/.config/aidaemon/skills/` are loaded (no config toggle needed)
+- Files are sorted alphabetically and rendered with `### filename` subheaders
+- Changes take effect immediately (no restart required)
+- To disable a skill, remove or rename the file (e.g., add `.disabled` extension)
+- Empty or whitespace-only files are silently skipped
+- Skills count toward the token budget — keep them concise
 
 ## Architecture
 

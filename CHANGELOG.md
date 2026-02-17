@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Skill files** — drop `.md` files into `~/.config/aidaemon/skills/` for custom agent instructions
+  - All `*.md` files automatically loaded into system prompt as `## Active Skills` section
+  - Sorted alphabetically, rendered with `### filename` subheaders
+  - Changes take effect immediately (no restart required)
+  - Counts toward token budget; empty files silently skipped
+  - Agent sees skills (read-only awareness) but cannot modify them
+
 ## [2.0.0] — 2026-02-16
 
 Major release with session lifecycle management and Windows support.
