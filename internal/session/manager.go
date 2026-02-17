@@ -478,3 +478,57 @@ func (m *Manager) generateTitle(parentCtx context.Context, sessionID, userMsg, a
 	}
 	log.Printf("[session] generated title for %s: %q", sessionID, title)
 }
+
+// StartDailyRotation launches a goroutine that rotates all active sessions
+// daily at 4AM. Returns a stop function. Also stops when ctx is cancelled.
+func (m *Manager) StartDailyRotation(ctx context.Context) func() {
+	ctx, cancel := context.WithCancel(ctx)
+
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+
+		var lastRotationDate string
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				today := now.Format("2006-01-02")
+				hour := now.Hour()
+
+				// Fire at 4AM, once per day.
+				if hour == 4 && lastRotationDate != today {
+					lastRotationDate = today
+					m.rotateAllActive(ctx)
+				}
+			}
+		}
+	}()
+
+	return cancel
+}
+
+// rotateAllActive rotates all active sessions across all channels.
+func (m *Manager) rotateAllActive(ctx context.Context) {
+	sessions, err := m.store.ListAllSessions("")
+	if err != nil {
+		log.Printf("[session] daily rotation list error: %v", err)
+		return
+	}
+
+	for _, sess := range sessions {
+		if sess.Status != "active" {
+			continue
+		}
+		// Only rotate sessions that started before today.
+		if sess.CreatedAt.Day() == time.Now().Day() {
+			continue
+		}
+		log.Printf("[session] daily rotation for channel %s (session %s)", sess.Channel, sess.ID)
+		if _, err := m.RotateSession(ctx, sess.Channel); err != nil {
+			log.Printf("[session] daily rotation failed for %s: %v", sess.Channel, err)
+		}
+	}
+}
