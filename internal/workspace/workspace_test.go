@@ -154,6 +154,11 @@ func TestLoad_IncludesRecentDailyLogs(t *testing.T) {
 
 	ws := Load(dir)
 
+	// Verify exactly 3 days are loaded (today, yesterday, 2 days ago).
+	if len(ws.DailyLogs) != 3 {
+		t.Errorf("expected 3 daily logs, got %d", len(ws.DailyLogs))
+	}
+
 	// SystemPrompt should include last 3 days only.
 	prompt := ws.SystemPrompt()
 	todayStr := today.Format("2006-01-02")

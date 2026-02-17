@@ -82,6 +82,9 @@ func Load(dir string) *Workspace {
 	w.DailyLogs = loadDailyLogs(dir, 3)
 
 	total := len(w.Soul) + len(w.User) + len(w.Memory) + len(w.Tools)
+	for _, dl := range w.DailyLogs {
+		total += len(dl.Content)
+	}
 	if total > tokenBudgetChars {
 		w.OverTokenBudget = true
 		log.Printf("[workspace] token budget warning: workspace content is %d chars (limit %d), consider trimming", total, tokenBudgetChars)
@@ -143,7 +146,7 @@ func loadDailyLogs(dir string, days int) []DailyLog {
 		return nil
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
+	cutoff := time.Now().AddDate(0, 0, -(days - 1)).Format("2006-01-02")
 	var logs []DailyLog
 
 	for _, entry := range entries {
@@ -156,6 +159,10 @@ func loadDailyLogs(dir string, days int) []DailyLog {
 			continue
 		}
 		dateStr := strings.TrimSuffix(name, ".md")
+		// Validate date format.
+		if _, err := time.Parse("2006-01-02", dateStr); err != nil {
+			continue
+		}
 		if dateStr < cutoff {
 			continue
 		}
