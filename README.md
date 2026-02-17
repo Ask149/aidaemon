@@ -10,6 +10,7 @@ Chat with GPT-5, Claude Opus 4.6, Gemini 3 Pro, and 10+ other models from your p
 - **Session management** — persistent session IDs with titles, browse/switch via web UI or API
 - **Auto-rotation** — daily 4AM rotation with memory flush and summary
 - **Skill files** — drop `.md` files into `~/.config/aidaemon/skills/` to inject custom instructions
+- **Scheduled tasks** — create cron jobs via natural language in Telegram (e.g., "Every weekday at 9am, check my calendar")
 - **Smart context** — load recent daily memory logs (last 3 days) into system prompt
 - **Streaming responses** — live typing indicators with adaptive debounce
 - **Tool execution** — read/write files, run shell commands, search the web
@@ -165,6 +166,10 @@ REST endpoints for programmatic access:
 | `/sessions/{id}/title` | POST | Rename session (body: `{"title": "..."}`) |
 | `/chat` | POST | Send message (existing endpoint) |
 | `/tool` | POST | Execute a tool directly |
+| `/cron/jobs` | GET | List all scheduled cron jobs |
+| `/cron/jobs` | POST | Create a cron job (body: `{"label", "cron_expr", "mode", "payload"}`) |
+| `/cron/jobs/{id}` | PATCH | Update a cron job (enable/disable, rename) |
+| `/cron/jobs/{id}` | DELETE | Delete a cron job |
 | `/health` | GET | Health check (no auth required) |
 
 All endpoints require `Authorization: Bearer <token>` header (token from config).
@@ -193,6 +198,7 @@ curl http://localhost:8420/health
 | `run_command` | Execute shell commands (destructive commands blocked) |
 | `web_fetch` | Fetch and extract text from any URL |
 | `web_search` | Search the web via Brave Search API or DuckDuckGo fallback |
+| `manage_cron` | Create, list, pause, resume, and delete scheduled tasks |
 
 ## MCP Servers
 
@@ -341,6 +347,65 @@ Skills appear in the system prompt as:
 - Empty or whitespace-only files are silently skipped
 - Skills count toward the token budget — keep them concise
 
+## Scheduled Tasks (Cron)
+
+AIDaemon can run recurring tasks on a schedule. Create jobs through natural language in Telegram — the agent parses your intent, creates a cron expression, and registers the job.
+
+**Example conversation:**
+```
+You: Every weekday at 9am, check my calendar and give me a briefing
+Agent: I've created a scheduled task:
+  - Label: Morning briefing
+  - Schedule: 0 9 * * 1-5 (weekdays at 9:00 AM)
+  - Mode: message (I'll think about your request each time)
+```
+
+**Two execution modes:**
+- **message** — sends the payload through the LLM (agent reasons about the task)
+- **tool** — directly executes a tool with fixed arguments (no LLM call)
+
+**Managing jobs via Telegram:**
+```
+You: List my scheduled tasks
+You: Pause the morning briefing
+You: Delete the daily standup reminder
+```
+
+**HTTP API:**
+```bash
+# List jobs
+curl http://localhost:8420/cron/jobs -H "Authorization: Bearer TOKEN"
+
+# Create a job
+curl -X POST http://localhost:8420/cron/jobs \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"Test","cron_expr":"*/5 * * * *","mode":"message","payload":"ping"}'
+
+# Pause a job
+curl -X PATCH http://localhost:8420/cron/jobs/cj_abc123 \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}'
+
+# Delete a job
+curl -X DELETE http://localhost:8420/cron/jobs/cj_abc123 \
+  -H "Authorization: Bearer TOKEN"
+```
+
+**Cron expression format** (standard 5-field):
+```
+┌───── minute (0-59)
+│ ┌───── hour (0-23)
+│ │ ┌───── day of month (1-31)
+│ │ │ ┌───── month (1-12)
+│ │ │ │ ┌───── day of week (0-6, Sun=0)
+│ │ │ │ │
+* * * * *
+```
+
+Supports `*`, ranges (`1-5`), lists (`1,3,5`), and steps (`*/15`).
+
 ## Architecture
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed technical documentation.
@@ -352,8 +417,8 @@ You (Telegram) ──→ Telegram Bot ──→ Copilot API (13+ models)
                         │                    │
                    SQLite Store    ┌─────────┴─────────┐
                                    │                   │
-                             Built-in Tools      MCP Servers
-                             (5 tools)           (70+ tools)
+                              Built-in Tools      MCP Servers
+                              (6 tools)           (70+ tools)
                                    │                   │
                              Files, Shell,      Browser, Calendar,
                              Web Search         Notes, Memory, ...
@@ -375,6 +440,7 @@ scripts/
 internal/
   auth/                  GitHub OAuth + Copilot token management
   config/                Configuration loading and validation
+  cron/                  Cron scheduler, executor, and expression parser
   httpapi/               REST API server
   mcp/                   MCP client (JSON-RPC 2.0 over stdio)
   permissions/           Per-tool permission enforcement
@@ -383,7 +449,7 @@ internal/
   store/                 SQLite conversation persistence (WAL mode)
   telegram/              Telegram bot (streaming, commands, images)
   tools/
-    builtin/             Built-in tools (5 tools)
+    builtin/             Built-in tools (6 tools)
     registry.go          Tool registry + execution engine
     mcp_tool.go          MCP tool adapter
 ```

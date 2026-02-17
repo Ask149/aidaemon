@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Scheduled tasks (cron)** — create recurring jobs via natural language in Telegram
+  - Pure Go 5-field cron expression parser (supports `*`, ranges, lists, steps)
+  - Two execution modes: `message` (LLM reasoning) and `tool` (direct tool call)
+  - Scheduler goroutine checks for due jobs every 60 seconds
+  - Output delivered back to the source channel (Telegram)
+  - Full CRUD: create, list, pause, resume, delete via agent conversation
+  - `manage_cron` built-in tool for agent-driven job management
+  - HTTP API endpoints: `GET/POST /cron/jobs`, `PATCH/DELETE /cron/jobs/{id}`
+  - SQLite persistence (`cron_jobs` + `cron_runs` tables) — survives daemon restarts
+  - Run history with automatic pruning (keeps last 50 runs per job)
 - **Skill files** — drop `.md` files into `~/.config/aidaemon/skills/` for custom agent instructions
   - All `*.md` files automatically loaded into system prompt as `## Active Skills` section
   - Sorted alphabetically, rendered with `### filename` subheaders
