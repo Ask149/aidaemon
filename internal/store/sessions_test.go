@@ -51,6 +51,41 @@ func TestCreateAndGetSession(t *testing.T) {
 	}
 }
 
+// TestGetNonExistentSession verifies that GetSession returns nil for a session that doesn't exist.
+func TestGetNonExistentSession(t *testing.T) {
+	st := tempStore(t, 100)
+
+	// Try to get a session that doesn't exist.
+	got, err := st.GetSession("nonexistent_id")
+	if err != nil {
+		t.Fatalf("GetSession(nonexistent): expected no error, got %v", err)
+	}
+	if got != nil {
+		t.Errorf("GetSession(nonexistent) = %+v, want nil", got)
+	}
+
+	// Verify this is different from an error condition by creating a session
+	// and then successfully retrieving it.
+	sess := Session{
+		ID:           "s_exists",
+		Channel:      "ws-test",
+		Status:       "active",
+		CreatedAt:    time.Now().UTC(),
+		LastActivity: time.Now().UTC(),
+	}
+	if err := st.CreateSession(sess); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	got, err = st.GetSession("s_exists")
+	if err != nil {
+		t.Fatalf("GetSession(s_exists): %v", err)
+	}
+	if got == nil {
+		t.Error("GetSession(s_exists) returned nil, expected session")
+	}
+}
+
 // TestActiveSession verifies we can find the active session for a channel.
 func TestActiveSession(t *testing.T) {
 	st := tempStore(t, 100)
