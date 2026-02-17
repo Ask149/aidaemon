@@ -43,6 +43,31 @@ type Message struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// CronJob represents a scheduled recurring task.
+type CronJob struct {
+	ID          string     `json:"id"`
+	Label       string     `json:"label"`
+	CronExpr    string     `json:"cron_expr"`
+	Mode        string     `json:"mode"` // "message" or "tool"
+	Payload     string     `json:"payload"`
+	ChannelType string     `json:"channel_type"`
+	ChannelMeta string     `json:"channel_meta"` // JSON
+	Enabled     bool       `json:"enabled"`
+	LastRunAt   *time.Time `json:"last_run_at,omitempty"`
+	NextRunAt   *time.Time `json:"next_run_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
+// CronRun records a single execution of a cron job.
+type CronRun struct {
+	ID         string     `json:"id"`
+	JobID      string     `json:"job_id"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	Status     string     `json:"status"` // "success" or "error"
+	Output     string     `json:"output"`
+}
+
 // MessageWithID is a Message with its database row ID.
 type MessageWithID struct {
 	ID        int64     `json:"id"`
@@ -93,6 +118,32 @@ type Conversation interface {
 
 	// ListAllSessions returns all sessions, optionally filtered by channel, newest first.
 	ListAllSessions(channel string) ([]Session, error)
+
+	// --- Cron jobs ---
+
+	// CreateCronJob inserts a new cron job.
+	CreateCronJob(job CronJob) error
+
+	// GetCronJob returns a cron job by ID, or nil if not found.
+	GetCronJob(id string) (*CronJob, error)
+
+	// ListCronJobs returns all cron jobs.
+	ListCronJobs() ([]CronJob, error)
+
+	// UpdateCronJob updates a cron job (enabled, next_run_at, last_run_at).
+	UpdateCronJob(job CronJob) error
+
+	// DeleteCronJob removes a cron job and its run history.
+	DeleteCronJob(id string) error
+
+	// DueCronJobs returns enabled jobs whose next_run_at <= now.
+	DueCronJobs(now time.Time) ([]CronJob, error)
+
+	// CreateCronRun records a job execution.
+	CreateCronRun(run CronRun) error
+
+	// PruneCronRuns keeps only the most recent N runs per job.
+	PruneCronRuns(jobID string, keep int) error
 
 	// Close closes the underlying storage.
 	Close() error
@@ -169,6 +220,11 @@ func (s *SQLiteStore) migrate() error {
 
 	// Migrate sessions table.
 	if err := s.migrateSessions(); err != nil {
+		return err
+	}
+
+	// Migrate cron jobs tables.
+	if err := s.migrateCronJobs(); err != nil {
 		return err
 	}
 
