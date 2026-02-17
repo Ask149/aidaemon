@@ -250,6 +250,18 @@ func TestLoad_NoSkillsDir(t *testing.T) {
 	}
 }
 
+func TestLoad_SkillsCountTowardTokenBudget(t *testing.T) {
+	dir := t.TempDir()
+	skillsDir := t.TempDir()
+	// Skills alone exceed budget.
+	writeTestFile(t, skillsDir, "big.md", strings.Repeat("x", tokenBudgetChars+1))
+
+	w := Load(dir, skillsDir)
+	if !w.OverTokenBudget {
+		t.Error("skills content should push workspace over token budget")
+	}
+}
+
 func TestSystemPrompt_IncludesSkills(t *testing.T) {
 	dir := t.TempDir()
 	skillsDir := t.TempDir()
