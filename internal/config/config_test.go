@@ -170,3 +170,51 @@ func TestValidate_UnknownProvider(t *testing.T) {
 		t.Error("expected error for unknown provider")
 	}
 }
+
+func TestTeamsEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		clientID string
+		tenantID string
+		chatID   string
+		want     bool
+	}{
+		{"all set", "cid", "tid", "chatid", true},
+		{"no client", "", "tid", "chatid", false},
+		{"no tenant", "cid", "", "chatid", false},
+		{"no chat", "cid", "tid", "", false},
+		{"all empty", "", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				TeamsClientID: tt.clientID,
+				TeamsTenantID: tt.tenantID,
+				TeamsChatID:   tt.chatID,
+			}
+			if got := cfg.TeamsEnabled(); got != tt.want {
+				t.Errorf("TeamsEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTeamsPollDuration(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval int
+		want     time.Duration
+	}{
+		{"zero default", 0, 3 * time.Second},
+		{"custom", 5, 5 * time.Second},
+		{"negative default", -1, 3 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{TeamsPollInterval: tt.interval}
+			if got := cfg.TeamsPollDuration(); got != tt.want {
+				t.Errorf("TeamsPollDuration() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

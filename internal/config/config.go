@@ -79,6 +79,12 @@ type Config struct {
 	// ProviderConfig holds settings for the OpenAI-compatible provider.
 	// Required when provider is "openai".
 	ProviderConfig ProviderConfigBlock `json:"provider_config,omitempty"`
+
+	// Teams channel configuration (optional — enables Microsoft Teams polling).
+	TeamsClientID     string `json:"teams_client_id"`
+	TeamsTenantID     string `json:"teams_tenant_id"`
+	TeamsChatID       string `json:"teams_chat_id"`
+	TeamsPollInterval int    `json:"teams_poll_interval"` // seconds, default 3
 }
 
 // ToolPermissionRule mirrors permissions.Rule for JSON config.
@@ -263,6 +269,20 @@ func (c *Config) HeartbeatDuration() time.Duration {
 		return 0
 	}
 	return time.Duration(c.HeartbeatInterval) * time.Minute
+}
+
+// TeamsEnabled returns true if Teams channel is configured.
+func (c *Config) TeamsEnabled() bool {
+	return c.TeamsClientID != "" && c.TeamsTenantID != "" && c.TeamsChatID != ""
+}
+
+// TeamsPollDuration returns the Teams polling interval as a time.Duration.
+// Returns 3 seconds if not configured or invalid.
+func (c *Config) TeamsPollDuration() time.Duration {
+	if c.TeamsPollInterval <= 0 {
+		return 3 * time.Second
+	}
+	return time.Duration(c.TeamsPollInterval) * time.Second
 }
 
 func configDir() (string, error) {
