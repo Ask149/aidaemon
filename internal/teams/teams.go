@@ -40,7 +40,6 @@ type Channel struct {
 	lastSeen     time.Time
 	graphBaseURL string
 	httpClient   *http.Client
-	accessToken  string // cached for use in Send; refreshed each poll
 }
 
 // New creates a new Teams channel. Call Start() to begin polling.
@@ -82,6 +81,11 @@ func (c *Channel) Start(ctx context.Context) error {
 
 // Send delivers a message to the Teams chat via the Graph API.
 func (c *Channel) Send(ctx context.Context, sessionID string, text string) error {
+	token, err := c.getToken()
+	if err != nil {
+		return fmt.Errorf("[teams] get token: %w", err)
+	}
+
 	url := fmt.Sprintf("%s/me/chats/%s/messages", c.graphBaseURL, c.cfg.ChatID)
 
 	body := map[string]interface{}{
@@ -100,7 +104,7 @@ func (c *Channel) Send(ctx context.Context, sessionID string, text string) error
 		return fmt.Errorf("[teams] build send request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.accessToken)
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -152,7 +156,6 @@ func (c *Channel) fetchUserID(ctx context.Context) error {
 	}
 
 	c.userID = me.ID
-	c.accessToken = token
 	return nil
 }
 
@@ -163,7 +166,6 @@ func (c *Channel) poll(ctx context.Context) {
 		log.Printf("[teams] get token: %v", err)
 		return
 	}
-	c.accessToken = token
 
 	url := fmt.Sprintf("%s/me/chats/%s/messages?$top=10&$orderby=createdDateTime%%20desc",
 		c.graphBaseURL, c.cfg.ChatID)
@@ -216,6 +218,11 @@ func (c *Channel) processMessages(ctx context.Context, msgs []graphMessage) {
 	var maxTS time.Time
 
 	for _, msg := range msgs {
+		// Skip system/bot messages (no sender user ID).
+		if msg.From.User.ID == "" {
+			continue
+		}
+
 		// Skip own messages.
 		if msg.From.User.ID == c.userID {
 			continue
@@ -275,11 +282,11 @@ func (c *Channel) processMessages(ctx context.Context, msgs []graphMessage) {
 }
 
 // getToken returns the current access token. If a TokenManager is configured,
-// it refreshes the token if needed. For testing, the httpClient/graphBaseURL
-// fields are set directly and no token manager is needed.
+// it refreshes the token if needed. For testing without a token manager,
+// returns an empty string (test servers don't validate tokens).
 func (c *Channel) getToken() (string, error) {
 	if c.cfg.TokenManager == nil {
-		return c.accessToken, nil
+		return "", nil
 	}
 
 	tok, err := c.cfg.TokenManager.GetToken()
@@ -353,21 +360,22 @@ func stripHTML(s string) string {
 	return b.String()
 }
 
+// htmlEntities maps basic HTML entities to their decoded equivalents.
+var htmlEntities = [...]struct {
+	encoded string
+	decoded string
+}{
+	{"&amp;", "&"},
+	{"&lt;", "<"},
+	{"&gt;", ">"},
+	{"&nbsp;", " "},
+	{"&quot;", "\""},
+}
+
 // decodeEntity decodes a basic HTML entity at the start of s.
 // Returns the decoded string and the number of bytes consumed, or ("", 0) if not recognized.
 func decodeEntity(s string) (string, int) {
-	entities := []struct {
-		encoded string
-		decoded string
-	}{
-		{"&amp;", "&"},
-		{"&lt;", "<"},
-		{"&gt;", ">"},
-		{"&nbsp;", " "},
-		{"&quot;", "\""},
-	}
-
-	for _, e := range entities {
+	for _, e := range htmlEntities {
 		if strings.HasPrefix(s, e.encoded) {
 			return e.decoded, len(e.encoded)
 		}

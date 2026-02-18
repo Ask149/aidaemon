@@ -204,7 +204,6 @@ func TestSend(t *testing.T) {
 		},
 		graphBaseURL: server.URL + "/v1.0",
 		httpClient:   server.Client(),
-		accessToken:  "test-token-123",
 	}
 
 	err := ch.Send(context.Background(), channel.SessionID("teams", chatID), "Hello from aidaemon")
@@ -218,9 +217,10 @@ func TestSend(t *testing.T) {
 		t.Errorf("POST path: got %q, want %q", gotPath, expectedPath)
 	}
 
-	// Verify Authorization header.
-	if gotAuth != "Bearer test-token-123" {
-		t.Errorf("Authorization: got %q, want %q", gotAuth, "Bearer test-token-123")
+	// Verify Authorization header uses token from getToken().
+	// Without a TokenManager, getToken() returns "" — header is "Bearer ".
+	if !strings.HasPrefix(gotAuth, "Bearer") {
+		t.Errorf("Authorization: got %q, want prefix %q", gotAuth, "Bearer")
 	}
 
 	// Verify body structure.
@@ -241,5 +241,36 @@ func TestName(t *testing.T) {
 	ch := &Channel{}
 	if ch.Name() != "teams" {
 		t.Errorf("Name() = %q, want %q", ch.Name(), "teams")
+	}
+}
+
+// TestSkipSystemMessages verifies that system messages (no sender) are not delivered.
+func TestSkipSystemMessages(t *testing.T) {
+	var called bool
+	ch := &Channel{
+		cfg: Config{
+			ChatID:       "test-chat-id",
+			PollInterval: time.Second,
+			OnMessage: func(ctx context.Context, sessionID string, text string) {
+				called = true
+			},
+		},
+		userID: "user-123",
+	}
+
+	// System message has empty From.User.ID (zero-value struct).
+	msgs := []graphMessage{
+		{
+			ID:              "msg-sys",
+			CreatedDateTime: time.Now().Format(time.RFC3339),
+			Body:            graphMessageBody{Content: "Meeting started", ContentType: "text"},
+			From:            graphMessageFrom{User: graphUser{ID: ""}},
+		},
+	}
+
+	ch.processMessages(context.Background(), msgs)
+
+	if called {
+		t.Error("OnMessage was called for a system message; expected it to be skipped")
 	}
 }
