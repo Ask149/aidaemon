@@ -1,9 +1,10 @@
-// AIDaemon — a personal AI assistant accessible via Telegram.
+// AIDaemon — a personal AI assistant accessible via Telegram and Microsoft Teams.
 //
 // Usage:
 //
 //	aidaemon              # run the daemon (reads ~/.config/aidaemon/config.json)
 //	aidaemon --login      # authenticate with GitHub Copilot via device flow
+//	aidaemon --login-teams # authenticate with Microsoft Teams via Entra ID device flow
 //
 // The daemon runs until SIGTERM or SIGINT.
 package main
@@ -36,6 +37,7 @@ import (
 	openaiProvider "github.com/Ask149/aidaemon/internal/provider/openai"
 	"github.com/Ask149/aidaemon/internal/session"
 	"github.com/Ask149/aidaemon/internal/store"
+	"github.com/Ask149/aidaemon/internal/teams"
 	"github.com/Ask149/aidaemon/internal/telegram"
 	"github.com/Ask149/aidaemon/internal/tools"
 	"github.com/Ask149/aidaemon/internal/tools/builtin"
@@ -45,7 +47,17 @@ import (
 
 func main() {
 	loginFlag := flag.Bool("login", false, "authenticate with GitHub Copilot via device flow")
+	loginTeamsFlag := flag.Bool("login-teams", false, "authenticate with Microsoft Teams via Entra ID device flow")
 	flag.Parse()
+
+	if *loginTeamsFlag {
+		cfg, err := config.Load()
+		if err != nil {
+			log.Fatalf("config: %v", err)
+		}
+		doLoginTeams(cfg)
+		return
+	}
 
 	if *loginFlag {
 		doLogin()
@@ -63,6 +75,24 @@ func doLogin() {
 		log.Fatalf("login failed: %v", err)
 	}
 	fmt.Printf("✅ Authenticated. Token: %s...%s\n", token[:4], token[len(token)-4:])
+}
+
+func doLoginTeams(cfg *config.Config) {
+	if cfg.TeamsClientID == "" || cfg.TeamsTenantID == "" {
+		log.Fatal("teams_client_id and teams_tenant_id must be set in config")
+	}
+	tok, err := auth.RunEntraDeviceFlow(cfg.TeamsClientID, cfg.TeamsTenantID)
+	if err != nil {
+		log.Fatalf("teams login failed: %v", err)
+	}
+	etm, err := auth.NewEntraTokenManager(cfg.TeamsClientID, cfg.TeamsTenantID)
+	if err != nil {
+		log.Fatalf("create token manager: %v", err)
+	}
+	if err := etm.SetToken(tok); err != nil {
+		log.Fatalf("save teams token: %v", err)
+	}
+	fmt.Printf("Teams token saved (expires in %s)\n", time.Until(tok.ExpiresAt).Round(time.Minute))
 }
 
 // createProvider creates the configured LLM provider.
@@ -289,6 +319,45 @@ func run() error {
 		log.Println("[daemon] telegram bot started")
 	} else {
 		log.Println("[daemon] telegram disabled (no token configured)")
+	}
+
+	// 6d. Teams channel (optional).
+	if cfg.TeamsEnabled() {
+		etm, err := auth.NewEntraTokenManager(cfg.TeamsClientID, cfg.TeamsTenantID)
+		if err != nil {
+			return fmt.Errorf("entra token manager: %w", err)
+		}
+		if !etm.HasToken() {
+			log.Println("[daemon] teams disabled (no token — run 'aidaemon --login-teams' to authenticate)")
+		} else {
+			// Declare teamsCh first so the OnMessage closure can reference it for Send.
+			var teamsCh *teams.Channel
+			teamsCh = teams.New(teams.Config{
+				ChatID:       cfg.TeamsChatID,
+				PollInterval: cfg.TeamsPollDuration(),
+				TokenManager: etm,
+				OnMessage: func(ctx context.Context, sessionID string, text string) {
+					result, err := mgr.HandleMessage(ctx, sessionID, text, session.HandleOptions{})
+					if err != nil {
+						log.Printf("[teams] handle message error: %v", err)
+						return
+					}
+					if result.Content != "" {
+						if err := teamsCh.Send(ctx, sessionID, result.Content); err != nil {
+							log.Printf("[teams] send error: %v", err)
+						}
+					}
+				},
+			})
+			go func() {
+				if err := teamsCh.Start(ctx); err != nil {
+					log.Printf("[teams] error: %v", err)
+				}
+			}()
+			log.Printf("[daemon] teams channel started (chat=%s, poll=%s)", cfg.TeamsChatID, cfg.TeamsPollDuration())
+		}
+	} else {
+		log.Println("[daemon] teams disabled (not configured)")
 	}
 
 	// 7. Heartbeat (optional).
