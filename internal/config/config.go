@@ -207,6 +207,20 @@ func (c *Config) validate() error {
 		return fmt.Errorf("telegram_token and telegram_user_id must both be set or both be empty")
 	}
 
+	// Teams: require all three IDs or none.
+	hasTeamsClient := c.TeamsClientID != ""
+	hasTeamsTenant := c.TeamsTenantID != ""
+	hasTeamsChat := c.TeamsChatID != ""
+	teamsSet := 0
+	for _, set := range []bool{hasTeamsClient, hasTeamsTenant, hasTeamsChat} {
+		if set {
+			teamsSet++
+		}
+	}
+	if teamsSet > 0 && teamsSet < 3 {
+		return fmt.Errorf("teams_client_id, teams_tenant_id, and teams_chat_id must all be set or all be empty")
+	}
+
 	if c.ChatModel == "" {
 		return fmt.Errorf("chat_model is required")
 	}

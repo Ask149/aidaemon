@@ -218,3 +218,30 @@ func TestTeamsPollDuration(t *testing.T) {
 		})
 	}
 }
+
+func TestValidate_PartialTeams_Error(t *testing.T) {
+	tests := []struct {
+		name     string
+		clientID string
+		tenantID string
+		chatID   string
+	}{
+		{"client only", "cid", "", ""},
+		{"tenant only", "", "tid", ""},
+		{"chat only", "", "", "chatid"},
+		{"missing chat", "cid", "tid", ""},
+		{"missing tenant", "cid", "", "chatid"},
+		{"missing client", "", "tid", "chatid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.TeamsClientID = tt.clientID
+			cfg.TeamsTenantID = tt.tenantID
+			cfg.TeamsChatID = tt.chatID
+			if err := cfg.validate(); err == nil {
+				t.Error("expected error for partial teams config")
+			}
+		})
+	}
+}
