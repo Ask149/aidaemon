@@ -378,8 +378,8 @@ func run() error {
 	// 8. Cron scheduler.
 	var cronSender cron.CronSender
 	if tbot != nil {
-		cronSender = &cron.TelegramSender{
-			SendFn: func(ctx context.Context, chatID int64, text string) error {
+		cronSender = &cron.ChannelSender{
+			TelegramFn: func(ctx context.Context, chatID int64, text string) error {
 				sid := channel.SessionID("telegram", strconv.FormatInt(chatID, 10))
 				return tbot.Send(ctx, sid, text)
 			},
