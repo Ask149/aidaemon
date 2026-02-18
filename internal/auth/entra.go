@@ -31,6 +31,9 @@ const (
 
 	// entraTokenFile is the filename for persisted Entra tokens.
 	entraTokenFile = "entra_token.json"
+
+	// entraScopes are the Microsoft Graph permissions requested.
+	entraScopes = "Chat.ReadWrite User.Read offline_access"
 )
 
 // entraEndpoints builds Microsoft identity platform URLs for a tenant.
@@ -69,8 +72,11 @@ type EntraTokenManager struct {
 }
 
 // NewEntraTokenManager creates an EntraTokenManager and loads any persisted token.
-func NewEntraTokenManager(clientID, tenantID string) *EntraTokenManager {
-	home, _ := os.UserHomeDir()
+func NewEntraTokenManager(clientID, tenantID string) (*EntraTokenManager, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("find home directory: %w", err)
+	}
 	tokenPath := filepath.Join(home, ".config", "aidaemon", entraTokenFile)
 
 	tm := &EntraTokenManager{
@@ -88,7 +94,7 @@ func NewEntraTokenManager(clientID, tenantID string) *EntraTokenManager {
 		}
 	}
 
-	return tm
+	return tm, nil
 }
 
 // GetToken returns a valid Entra token, refreshing if needed.
@@ -96,9 +102,10 @@ func (tm *EntraTokenManager) GetToken() (*EntraToken, error) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
-	// Fast path: cached token still valid.
+	// Fast path: cached token still valid. Return a copy to avoid mutation.
 	if tm.token != nil && !tm.token.IsExpired() {
-		return tm.token, nil
+		tok := *tm.token
+		return &tok, nil
 	}
 
 	// Need to refresh.
@@ -116,7 +123,8 @@ func (tm *EntraTokenManager) GetToken() (*EntraToken, error) {
 		fmt.Fprintf(os.Stderr, "⚠️  Could not save Entra token: %v\n", err)
 	}
 
-	return tm.token, nil
+	result := *tm.token
+	return &result, nil
 }
 
 // HasToken returns true if a token exists (may be expired).
@@ -141,7 +149,7 @@ func (tm *EntraTokenManager) doRefresh(refreshToken string) (*EntraToken, error)
 		"client_id":     {tm.clientID},
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {refreshToken},
-		"scope":         {"Chat.ReadWrite User.Read offline_access"},
+		"scope":         {entraScopes},
 	}
 
 	req, err := http.NewRequest("POST", entraTokenURL(tm.tenantID), strings.NewReader(form.Encode()))
@@ -219,7 +227,7 @@ func RunEntraDeviceFlow(clientID, tenantID string) (*EntraToken, error) {
 	// Step 1: Request device code.
 	form := url.Values{
 		"client_id": {clientID},
-		"scope":     {"Chat.ReadWrite User.Read offline_access"},
+		"scope":     {entraScopes},
 	}
 	req, err := http.NewRequest("POST", entraDeviceCodeURL(tenantID), strings.NewReader(form.Encode()))
 	if err != nil {
