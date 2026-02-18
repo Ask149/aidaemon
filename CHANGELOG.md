@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.4.0] — 2026-02-17
+
+### Added
+- **Microsoft Teams channel** — use Teams as a chat interface via Graph API polling
+  - Outbound-only: no webhook needed, works behind Azure VPN
+  - Entra ID device code flow for authentication (`aidaemon --login-teams`)
+  - Polls `GET /me/chats/{chatId}/messages` for new messages
+  - Self-message filtering, HTML tag stripping, automatic token refresh
+  - Cron job output delivery to Teams channel
+
+### Changed
+- Renamed `TelegramSender` to `ChannelSender` to support multiple channel backends
+
 ## [2.3.0] — 2026-02-17
 
 ### Added

@@ -1,12 +1,13 @@
 # AIDaemon
 
-A personal AI agent daemon that runs on your machine and gives you access to premium LLM models through Telegram — powered by GitHub Copilot, OpenAI, Azure OpenAI, Ollama, or any OpenAI-compatible API.
+A personal AI agent daemon that runs on your machine and gives you access to premium LLM models through Telegram or Microsoft Teams — powered by GitHub Copilot, OpenAI, Azure OpenAI, Ollama, or any OpenAI-compatible API.
 
-Chat with GPT-5, Claude Opus 4.6, Gemini 3 Pro, and 10+ other models from your phone, tablet, or any device with Telegram. Execute tools, browse the web, control your Mac, and integrate with 70+ MCP-powered capabilities — all for $10/month.
+Chat with GPT-5, Claude Opus 4.6, Gemini 3 Pro, and 10+ other models from your phone, tablet, or any device with Telegram or Teams. Execute tools, browse the web, control your Mac, and integrate with 70+ MCP-powered capabilities — all for $10/month.
 
 ## Features
 
 - **13+ premium models** — GPT-5, Claude Opus 4.6, Gemini 3 Pro, and more via GitHub Copilot API
+- **Multi-channel** — chat via Telegram or Microsoft Teams (outbound-only, works behind VPN)
 - **Session management** — persistent session IDs with titles, browse/switch via web UI or API
 - **Auto-rotation** — daily 4AM rotation with memory flush and summary
 - **Skill files** — drop `.md` files into `~/.config/aidaemon/skills/` to inject custom instructions
@@ -33,7 +34,7 @@ Chat with GPT-5, Claude Opus 4.6, Gemini 3 Pro, and 10+ other models from your p
 - **Operating System:** Windows, macOS, or Linux
 - **Go 1.25+**
 - **GitHub Copilot** subscription ($10/month), or any OpenAI-compatible API key
-- **Telegram** account
+- **Telegram** account and/or **Microsoft Teams** (M365 license)
 
 ### Install
 
@@ -169,6 +170,62 @@ AIDaemon defaults to **GitHub Copilot** as its LLM provider. To use a different 
 
 </details>
 
+### Teams Channel (Optional)
+
+AIDaemon can use Microsoft Teams as a chat channel instead of (or alongside) Telegram. This uses Graph API polling — outbound-only, no webhook or Bot Framework needed — so it works behind corporate VPNs with no inbound ports.
+
+**Prerequisites:**
+- Microsoft 365 account with Teams
+- Azure AD app registration with delegated permissions: `Chat.ReadWrite`, `User.Read`, `offline_access`
+
+<details>
+<summary><strong>Azure AD app registration</strong></summary>
+
+1. Go to [Azure Portal > App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) > **New registration**
+2. Name: `AIDaemon` (or any name)
+3. Supported account types: **Single tenant**
+4. Redirect URI: select **Public client/native** and set `https://login.microsoftonline.com/common/oauth2/nativeclient`
+5. After creation, go to **API permissions** > **Add a permission** > **Microsoft Graph** > **Delegated permissions**:
+   - `Chat.ReadWrite`
+   - `User.Read`
+   - `offline_access`
+6. Note down: **Application (client) ID** and **Directory (tenant) ID**
+
+</details>
+
+**Configure** — add to your `config.json`:
+
+```jsonc
+{
+  "teams_client_id": "YOUR-APP-CLIENT-ID",
+  "teams_tenant_id": "YOUR-TENANT-ID",
+  "teams_chat_id": "19:meeting-XXXXX@thread.v2",
+  "teams_poll_interval": "3s"  // optional, default 3s
+}
+```
+
+<details>
+<summary><strong>Finding your Teams chat ID</strong></summary>
+
+1. Open Teams in a browser at [teams.microsoft.com](https://teams.microsoft.com)
+2. Navigate to the chat you want the daemon to monitor
+3. The chat ID is in the URL: `https://teams.microsoft.com/v2/#/l/chat/.../19:meeting-XXXXX@thread.v2`
+4. Or use Graph Explorer: `GET https://graph.microsoft.com/v1.0/me/chats` to list your chats
+
+</details>
+
+**Authenticate:**
+
+```bash
+# macOS / Linux
+./aidaemon --login-teams
+
+# Windows (PowerShell)
+.\aidaemon.exe --login-teams
+```
+
+Follow the device code flow — open the URL, enter the code, sign in with your Microsoft account. The token is saved to `~/.config/aidaemon/entra_token.json` and refreshes automatically.
+
 ### Run
 
 **macOS / Linux:**
@@ -181,7 +238,7 @@ AIDaemon defaults to **GitHub Copilot** as its LLM provider. To use a different 
 .\aidaemon.exe
 ```
 
-The daemon starts, connects to Telegram, and waits for your messages.
+The daemon starts, connects to your configured channels (Telegram and/or Teams), and waits for your messages.
 
 **Note for Windows users:**
 - The daemon will create its configuration directory at `%USERPROFILE%\.config\aidaemon\`
@@ -326,6 +383,12 @@ Configure in `config.json`:
     "api_key": "sk-...",
     "azure_api_version": ""            // Set for Azure OpenAI (e.g., "2024-02-01")
   },
+
+  // Teams channel (optional — requires all 3 IDs or none)
+  "teams_client_id": "string",        // Azure AD app client ID
+  "teams_tenant_id": "string",        // Azure AD tenant ID
+  "teams_chat_id": "string",          // Teams chat ID to monitor
+  "teams_poll_interval": "3s",        // Polling interval (default: 3s)
 
   // System prompt
   "system_prompt": "string",           // Inline prompt (overridden by system_prompt.md file)
@@ -549,7 +612,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed technical documentation.
 
 ```
 You (Telegram) ──→ Telegram Bot ──→ LLM Provider (Copilot/OpenAI/Azure/Ollama)
-                        │                    │
+You (Teams)    ──→ Teams Channel ──┘        │
                         │              Tool calls
                         │                    │
                    SQLite Store    ┌─────────┴─────────┐
@@ -575,7 +638,7 @@ scripts/
   com.ask149.*.plist     macOS launchd agent for 30-min checks
 
 internal/
-  auth/                  GitHub OAuth + Copilot token management
+  auth/                  GitHub OAuth + Copilot token management + Entra ID (Teams)
   config/                Configuration loading and validation
   cron/                  Cron scheduler, executor, and expression parser
   httpapi/               REST API server
@@ -585,6 +648,7 @@ internal/
     copilot/             GitHub Copilot API implementation
     openai/              OpenAI-compatible provider (OpenAI, Azure, Ollama, etc.)
   store/                 SQLite conversation persistence (WAL mode)
+  teams/                 Microsoft Teams channel (Graph API polling)
   telegram/              Telegram bot (streaming, commands, images)
   tools/
     builtin/             Built-in tools (6 tools)
@@ -797,7 +861,7 @@ make watchdog                 # Run watchdog once manually
 
 ## Security
 
-- **Single-user only** — messages from unauthorized Telegram users are silently dropped
+- **Single-user only** — messages from unauthorized Telegram users are silently dropped; Teams uses your own Entra ID identity
 - **Local execution** — all tools run on your machine; nothing leaves except LLM API calls
 - **Permission system** — per-tool whitelist/deny rules for paths, commands, and domains
 - **Audit trail** — every tool execution logged with timestamps, duration, and status
