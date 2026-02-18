@@ -1,6 +1,6 @@
 # AIDaemon
 
-A personal AI agent daemon that runs on your machine and gives you access to premium LLM models through Telegram — powered by your GitHub Copilot subscription.
+A personal AI agent daemon that runs on your machine and gives you access to premium LLM models through Telegram — powered by GitHub Copilot, OpenAI, Azure OpenAI, Ollama, or any OpenAI-compatible API.
 
 Chat with GPT-5, Claude Opus 4.6, Gemini 3 Pro, and 10+ other models from your phone, tablet, or any device with Telegram. Execute tools, browse the web, control your Mac, and integrate with 70+ MCP-powered capabilities — all for $10/month.
 
@@ -32,7 +32,7 @@ Chat with GPT-5, Claude Opus 4.6, Gemini 3 Pro, and 10+ other models from your p
 
 - **Operating System:** Windows, macOS, or Linux
 - **Go 1.25+**
-- **GitHub Copilot** subscription ($10/month)
+- **GitHub Copilot** subscription ($10/month), or any OpenAI-compatible API key
 - **Telegram** account
 
 ### Install
@@ -97,6 +97,75 @@ When `~/.config/aidaemon/system_prompt.md` exists, it is loaded automatically an
 **Bot token:** Message [@BotFather](https://t.me/botfather) → `/newbot` → follow prompts → copy the token.
 
 **User ID:** Message [@userinfobot](https://t.me/userinfobot) → copy your numeric ID.
+
+</details>
+
+### Provider Configuration
+
+AIDaemon defaults to **GitHub Copilot** as its LLM provider. To use a different OpenAI-compatible API, set the `provider` field in your config.
+
+<details>
+<summary><strong>OpenAI</strong></summary>
+
+```jsonc
+{
+  "provider": "openai",
+  "provider_config": {
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "sk-..."
+  },
+  "chat_model": "gpt-4o"
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Azure OpenAI</strong></summary>
+
+```jsonc
+{
+  "provider": "openai",
+  "provider_config": {
+    "base_url": "https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT",
+    "api_key": "your-azure-api-key",
+    "azure_api_version": "2024-02-01"
+  },
+  "chat_model": "gpt-4o"
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Ollama (local)</strong></summary>
+
+```jsonc
+{
+  "provider": "openai",
+  "provider_config": {
+    "base_url": "http://localhost:11434/v1",
+    "api_key": "ollama"
+  },
+  "chat_model": "llama3.1"
+}
+```
+
+</details>
+
+<details>
+<summary><strong>OpenRouter</strong></summary>
+
+```jsonc
+{
+  "provider": "openai",
+  "provider_config": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key": "sk-or-..."
+  },
+  "chat_model": "anthropic/claude-sonnet-4"
+}
+```
 
 </details>
 
@@ -249,6 +318,14 @@ Configure in `config.json`:
   "chat_model": "claude-sonnet-4.5",   // Default LLM model
   "max_conversation_messages": 20,     // Messages before context compaction
   "token_limit": 128000,               // Token limit for rotation threshold
+
+  // Provider (default: copilot)
+  "provider": "copilot",               // "copilot" or "openai"
+  "provider_config": {                 // Required when provider is "openai"
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "sk-...",
+    "azure_api_version": ""            // Set for Azure OpenAI (e.g., "2024-02-01")
+  },
 
   // System prompt
   "system_prompt": "string",           // Inline prompt (overridden by system_prompt.md file)
@@ -471,7 +548,7 @@ curl http://localhost:8420/hooks/runs/wh_abc123 \
 See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed technical documentation.
 
 ```
-You (Telegram) ──→ Telegram Bot ──→ Copilot API (13+ models)
+You (Telegram) ──→ Telegram Bot ──→ LLM Provider (Copilot/OpenAI/Azure/Ollama)
                         │                    │
                         │              Tool calls
                         │                    │
@@ -506,6 +583,7 @@ internal/
   permissions/           Per-tool permission enforcement
   provider/
     copilot/             GitHub Copilot API implementation
+    openai/              OpenAI-compatible provider (OpenAI, Azure, Ollama, etc.)
   store/                 SQLite conversation persistence (WAL mode)
   telegram/              Telegram bot (streaming, commands, images)
   tools/

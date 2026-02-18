@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-02-17
+
+### Added
+- **Multi-provider support** — configure any OpenAI-compatible LLM API
+  - New `provider` config field: `"copilot"` (default) or `"openai"`
+  - Supports OpenAI, Azure OpenAI, Ollama, OpenRouter, and any OpenAI-compatible endpoint
+  - Azure mode: set `azure_api_version` to use `api-key` header and `?api-version=` query param
+  - Full feature parity: Chat, Stream, tool calling all work identically
+
 ## [2.2.0] — 2026-02-17
 
 ### Added
@@ -120,7 +129,8 @@ First complete release with all core features.
 - Pre-commit hook to block accidental credential commits
 - Dual logging (stderr + file)
 
-[Unreleased]: https://github.com/Ask149/aidaemon/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/Ask149/aidaemon/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/Ask149/aidaemon/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/Ask149/aidaemon/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/Ask149/aidaemon/compare/v2.0.1...v2.1.0
 [2.0.0]: https://github.com/Ask149/aidaemon/compare/v0.1.0...v2.0.0
