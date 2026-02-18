@@ -200,7 +200,7 @@ AIDaemon can use Microsoft Teams as a chat channel instead of (or alongside) Tel
   "teams_client_id": "YOUR-APP-CLIENT-ID",
   "teams_tenant_id": "YOUR-TENANT-ID",
   "teams_chat_id": "19:meeting-XXXXX@thread.v2",
-  "teams_poll_interval": "3s"  // optional, default 3s
+  "teams_poll_interval": 3  // optional, seconds (default: 3)
 }
 ```
 
@@ -388,7 +388,7 @@ Configure in `config.json`:
   "teams_client_id": "string",        // Azure AD app client ID
   "teams_tenant_id": "string",        // Azure AD tenant ID
   "teams_chat_id": "string",          // Teams chat ID to monitor
-  "teams_poll_interval": "3s",        // Polling interval (default: 3s)
+  "teams_poll_interval": 3,           // Polling interval in seconds (default: 3)
 
   // System prompt
   "system_prompt": "string",           // Inline prompt (overridden by system_prompt.md file)

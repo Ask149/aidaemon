@@ -322,6 +322,7 @@ func run() error {
 	}
 
 	// 6d. Teams channel (optional).
+	var teamsCh *teams.Channel
 	if cfg.TeamsEnabled() {
 		etm, err := auth.NewEntraTokenManager(cfg.TeamsClientID, cfg.TeamsTenantID)
 		if err != nil {
@@ -330,8 +331,7 @@ func run() error {
 		if !etm.HasToken() {
 			log.Println("[daemon] teams disabled (no token — run 'aidaemon --login-teams' to authenticate)")
 		} else {
-			// Declare teamsCh first so the OnMessage closure can reference it for Send.
-			var teamsCh *teams.Channel
+			// Assign to the outer teamsCh so the cron sender can reference it.
 			teamsCh = teams.New(teams.Config{
 				ChatID:       cfg.TeamsChatID,
 				PollInterval: cfg.TeamsPollDuration(),
@@ -377,12 +377,22 @@ func run() error {
 
 	// 8. Cron scheduler.
 	var cronSender cron.CronSender
-	if tbot != nil {
-		cronSender = &cron.ChannelSender{
-			TelegramFn: func(ctx context.Context, chatID int64, text string) error {
+	{
+		cs := &cron.ChannelSender{}
+		if tbot != nil {
+			cs.TelegramFn = func(ctx context.Context, chatID int64, text string) error {
 				sid := channel.SessionID("telegram", strconv.FormatInt(chatID, 10))
 				return tbot.Send(ctx, sid, text)
-			},
+			}
+		}
+		if teamsCh != nil {
+			cs.TeamsFn = func(ctx context.Context, chatID, text string) error {
+				sid := channel.SessionID("teams", chatID)
+				return teamsCh.Send(ctx, sid, text)
+			}
+		}
+		if cs.TelegramFn != nil || cs.TeamsFn != nil {
+			cronSender = cs
 		}
 	}
 
