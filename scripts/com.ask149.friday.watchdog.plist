@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ask149.friday.watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/ashishkshirsagar/Projects/active/aidaemon/scripts/friday-watchdog.sh</string>
+    </array>
+
+    <!-- Run every 300 seconds (5 minutes) — script has crash loop backoff -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <!-- Also run immediately when loaded -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/ashishkshirsagar</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/ashishkshirsagar/.config/aidaemon/data/logs/friday-watchdog-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/ashishkshirsagar/.config/aidaemon/data/logs/friday-watchdog-launchd.log</string>
+</dict>
+</plist>
