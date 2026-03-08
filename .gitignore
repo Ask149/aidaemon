@@ -1,0 +1,41 @@
+# Binaries
+/aidaemon
+/test-copilot
+/probe-models
+*.exe
+
+# OS
+.DS_Store
+
+# Playwright screenshots (generated at runtime)
+*.png
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.code-workspace
+
+# Go
+/vendor/
+coverage.out
+coverage.html
+
+# Auth (never commit tokens)
+auth.json
+
+# Pre-commit hook patterns (contains personal info)
+.githooks/blocked-patterns.txt
+
+# Git worktrees
+.worktrees/
+
+# AI context & instructions (local-only, symlinked to ~/.config/ai/)
+context/
+.github/copilot-instructions.md
+AGENTS.md
+CLAUDE.md
+.clinerules
+.cursor/
+.cline/
+.playwright-mcp/

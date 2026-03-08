@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Pre-commit hook: block personal/sensitive info from entering git history.
+# Patterns loaded from .githooks/blocked-patterns.txt (gitignored).
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+PATTERNS_FILE="$HOOK_DIR/blocked-patterns.txt"
+
+if [ ! -f "$PATTERNS_FILE" ]; then
+  exit 0
+fi
+
+PATTERNS=()
+while IFS= read -r line; do
+  line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [[ -z "$line" || "$line" == \#* ]] && continue
+  PATTERNS+=("$line")
+done < "$PATTERNS_FILE"
+
+if [ ${#PATTERNS[@]} -eq 0 ]; then
+  exit 0
+fi
+
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)
+
+if [ -z "$STAGED_FILES" ]; then
+  exit 0
+fi
+
+FAILED=0
+
+for pattern in "${PATTERNS[@]}"; do
+  MATCHES=""
+  for file in $STAGED_FILES; do
+    case "$file" in
+      *.sum|*.png|*.jpg|*.jpeg|*.gif|*.ico|*.woff*|*.ttf|*.eot|*.lock) continue ;;
+    esac
+    HIT=$(git show ":$file" 2>/dev/null | grep -inE "$pattern" 2>/dev/null || true)
+    if [ -n "$HIT" ]; then
+      MATCHES+="  $file: $HIT"$'\n'
+    fi
+  done
+  if [ -n "$MATCHES" ]; then
+    echo -e "${RED}BLOCKED:${NC} Pattern '${pattern}' found in staged files:"
+    echo "$MATCHES"
+    FAILED=1
+  fi
+done
+
+if [ "$FAILED" -eq 1 ]; then
+  echo ""
+  echo -e "${RED}Commit blocked.${NC} Remove personal/sensitive data before committing."
+  echo "To bypass (use with caution): git commit --no-verify"
+  exit 1
+fi
+
+echo -e "${GREEN}OK${NC} No personal info detected in staged files."
+exit 0

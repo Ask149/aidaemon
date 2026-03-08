@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Template: Replace __HOME__ and __AIDAEMON_DIR__ with your paths.
+     Quick setup: sed "s|__HOME__|$HOME|g; s|__AIDAEMON_DIR__|$(pwd)|g" com.aidaemon.watchdog.plist.template > com.aidaemon.watchdog.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aidaemon.watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__AIDAEMON_DIR__/scripts/watchdog.sh</string>
+    </array>
+
+    <!-- Run every 1800 seconds (30 minutes) -->
+    <key>StartInterval</key>
+    <integer>1800</integer>
+
+    <!-- Also run immediately when loaded -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Environment for node/npx (MCP servers need this) -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>__HOME__</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.config/aidaemon/data/logs/watchdog-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.config/aidaemon/data/logs/watchdog-launchd.log</string>
+</dict>
+</plist>
