@@ -244,11 +244,18 @@ func (a *API) handleChat(w http.ResponseWriter, r *http.Request) {
 	messages := make([]provider.Message, 0, len(history)+1)
 	// Re-read workspace for fresh system prompt.
 	sysPrompt := a.cfg.SysPrompt
-	if req.SystemPrompt != "" {
-		sysPrompt = req.SystemPrompt
-	} else if a.cfg.WorkspaceDir != "" {
+	if a.cfg.WorkspaceDir != "" {
 		ws := workspace.Load(a.cfg.WorkspaceDir, a.cfg.SkillsDir)
 		sysPrompt = ws.SystemPrompt()
+	}
+	// Append per-request system prompt (e.g. voice formatting rules from Friday)
+	// rather than replacing the workspace prompt. This preserves SOUL/USER/MEMORY context.
+	if req.SystemPrompt != "" {
+		if sysPrompt != "" {
+			sysPrompt = sysPrompt + "\n\n" + req.SystemPrompt
+		} else {
+			sysPrompt = req.SystemPrompt
+		}
 	}
 	if sysPrompt != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: sysPrompt})
